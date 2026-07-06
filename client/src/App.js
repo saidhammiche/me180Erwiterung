@@ -599,15 +599,17 @@ const EnergyManager = () => {
   );
 };
 
-// ─── MAPPING METRIC OPTIONS (Strom / Wirkleistung / Energie) ────────────────
+// ─── MAPPING METRIC OPTIONS (Strom / Wirkleistung / Spannung / Energie) ────────────────
 const MAPPING_METRIC_OPTIONS = [
-  { value: "Strom",        label: "Strom (A)",       icon: ElectricBoltIcon,        decimals: 3, unit: "A"   },
+  { value: "Strom",        label: "Strom (A)",        icon: ElectricBoltIcon,        decimals: 3, unit: "A"   },
   { value: "Wirkleistung", label: "Wirkleistung (W)", icon: SpeedIcon,               decimals: 2, unit: "W"   },
+  { value: "Spannung",     label: "Spannung (V)",     icon: VoltageSvgIcon,          decimals: 1, unit: "V"   },
   { value: "Energie",      label: "Energie (kWh)",    icon: BatteryChargingFullIcon, decimals: 2, unit: "kWh" },
 ];
 const MAPPING_METRIC_LABELS = {
   Strom:        "Strom (A)",
   Wirkleistung: "Wirkleistung (W)",
+  Spannung:     "Spannung (V)",
   Energie:      "Energie (kWh)",
 };
 const KANAL_LABELS = { "1": "L1", "2": "L2", "3": "L3", "4": "N" };
@@ -781,7 +783,18 @@ const MappingManager = () => {
 
   useEffect(() => { loadSensors(false); }, []);
 
-  const allDeviceNames = sensors.map(s => s.device);
+  // ✅ Le device tension ("Netz", anciennement "Sensor0") est affiché à part,
+  // dans des boîtes Phase 1/2/3 comme sur l'onglet Echtzeit — pas comme une
+  // carte de capteur générique.
+  const netzDevice   = sensors.find(s => s.device === "Netz" || s.device === "Sensor0");
+  const otherSensors = sensors.filter(s => s !== netzDevice);
+  const getNetzVoltage = (kanalNum) => {
+    if (!netzDevice) return null;
+    const k = netzDevice.kanaele.find(k => k.kanal === String(kanalNum));
+    return k?.Spannung ?? null;
+  };
+
+  const allDeviceNames = otherSensors.map(s => s.device);
   const hasActiveFilters = selectedSensors.length > 0 || selectedMappingMetrics.length > 0;
 
   const handleSensorChange     = useCallback(e => setSelectedSensors(e.target.value), []);
@@ -794,7 +807,7 @@ const MappingManager = () => {
   const shouldShowMetric = key    => selectedMappingMetrics.length === 0 || selectedMappingMetrics.includes(key);
 
   if (detailDevice) {
-    const sensorObj = sensors.find(s => s.device === detailDevice);
+    const sensorObj = otherSensors.find(s => s.device === detailDevice);
     if (sensorObj) {
       return (
         <MappingDetail
@@ -810,7 +823,8 @@ const MappingManager = () => {
 
   if (loading) return <Typography sx={{ p: 3 }}>Sensoren werden erkannt...</Typography>;
 
-  const visibleSensors = sensors.filter(s => shouldShowSensor(s.device));
+  const visibleSensors = otherSensors.filter(s => shouldShowSensor(s.device));
+  const showNetzBox = Boolean(netzDevice) && (selectedSensors.length === 0) && shouldShowMetric("Spannung");
 
   return (
     <>
@@ -836,6 +850,23 @@ const MappingManager = () => {
 
       {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2 }}>{message}</Alert>}
 
+      {showNetzBox && (
+        <Box display="flex" gap={2} sx={{ mb: "25px", flexDirection: isMobile ? "column" : "row" }}>
+          {[{ phase: "Phase 1", kanal: 1, label: "Spannung L1" },
+            { phase: "Phase 2", kanal: 2, label: "Spannung L2" },
+            { phase: "Phase 3", kanal: 3, label: "Spannung L3" }].map(({ phase, kanal, label }) => (
+            <Paper key={phase} elevation={2} style={{ flex: 1, padding: 15, backgroundColor: "#fff", borderRadius: 10, textAlign: "center" }}>
+              <Box display="flex" alignItems="center" justifyContent="center" gap={1}>
+                <VoltageSvgIcon style={{ color: PRIMARY_COLOR }} />
+                <Typography variant="subtitle1" fontWeight={600}>{phase}</Typography>
+              </Box>
+              <Typography variant="h3" fontWeight={600}>{formatValue(getNetzVoltage(kanal), 1, "V")}</Typography>
+              <Typography variant="caption">{label}</Typography>
+            </Paper>
+          ))}
+        </Box>
+      )}
+
       {visibleSensors.length === 0 ? (
         <Paper elevation={1} sx={{ p: 3 }}>
           <Typography color="text.secondary">Keine aktiven Sensoren in InfluxDB gefunden.</Typography>
@@ -843,7 +874,8 @@ const MappingManager = () => {
       ) : (
         <div style={{ display: "flex", gap: 15, flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>
           {visibleSensors.map(({ device, kanaele }) => {
-            const visibleMetricsExist = MAPPING_METRIC_OPTIONS.some(m => shouldShowMetric(m.value));
+            const cardMetrics = MAPPING_METRIC_OPTIONS.filter(m => m.value !== "Spannung");
+            const visibleMetricsExist = cardMetrics.some(m => shouldShowMetric(m.value));
             if (!visibleMetricsExist) return null;
             return (
               <Paper key={device} elevation={1} onClick={() => setDetailDevice(device)}
@@ -863,7 +895,7 @@ const MappingManager = () => {
                     <Typography variant="caption" style={{ color: "#666", fontWeight: 600 }}>
                       {KANAL_LABELS[k.kanal] || k.kanal} (Kanal {k.kanal})
                     </Typography>
-                    {MAPPING_METRIC_OPTIONS.map(m => {
+                    {cardMetrics.map(m => {
                       if (!shouldShowMetric(m.value)) return null;
                       const Icon = m.icon;
                       return (

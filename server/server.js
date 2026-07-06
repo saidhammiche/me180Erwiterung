@@ -256,21 +256,24 @@ app.post("/mapping", (req, res) => {
 
 // ========== ROUTE DECOUVERTE DYNAMIQUE SENSOR/KANAL (nouvel onglet Mapping) ==========
 // Interroge InfluxDB sans limite de temps fixe pour lister tous les Device/Kanal
-// réellement présents dans le bucket, avec leurs dernières valeurs Strom / Wirkleistung / Energie.
+// réellement présents dans le bucket, avec leurs dernières valeurs Strom / Wirkleistung /
+// Spannung / Energie.
+// ✅ Spannung ajoutée : le device "Netz" (anciennement "Sensor0") porte la tension du
+// réseau sur les Kanal 1/2/3 (L1/L2/L3) ; il n'est plus exclu du résultat.
 
 app.get("/sensors-discovery", async (req, res) => {
     try {
         const fluxQuery = `
             from(bucket: "${INFLUX_BUCKET}")
               |> range(start: 0)
-              |> filter(fn: (r) => r["_measurement"] == "sensoren")
-              |> filter(fn: (r) => r["_field"] == "Strom" or r["_field"] == "Wirkleistung" or r["_field"] == "Energie")
+              |> filter(fn: (r) => r["_measurement"] == "sensoren1")
+              |> filter(fn: (r) => r["_field"] == "Strom" or r["_field"] == "Wirkleistung" or r["_field"] == "Energie" or r["_field"] == "Spannung")
               |> last()
         `;
 
         const rows = await queryApi.collectRows(fluxQuery);
 
-        // Regrouper par Device -> Kanal -> { Strom, Wirkleistung, Energie, time }
+        // Regrouper par Device -> Kanal -> { Strom, Wirkleistung, Spannung, Energie, time }
         const bySensor = {};
 
         rows.forEach(row => {
@@ -278,16 +281,17 @@ app.get("/sensors-discovery", async (req, res) => {
             const kanal  = String(row.Kanal);
             const field  = row._field;
 
-            if (!device || device === "Sensor0") return; // Sensor0 réservé aux tensions, on l'exclut ici
+            if (!device) return;
 
             if (!bySensor[device]) bySensor[device] = {};
             if (!bySensor[device][kanal]) {
-                bySensor[device][kanal] = { kanal, Strom: null, Wirkleistung: null, Energie: null, updatedAt: null };
+                bySensor[device][kanal] = { kanal, Strom: null, Wirkleistung: null, Spannung: null, Energie: null, updatedAt: null };
             }
 
-            if (field === "Strom")        bySensor[device][kanal].Strom        = row._value;
-            else if (field === "Wirkleistung") bySensor[device][kanal].Wirkleistung = row._value;
-            else if (field === "Energie")      bySensor[device][kanal].Energie      = row._value;
+            if      (field === "Strom")        bySensor[device][kanal].Strom        = row._value;
+            else if (field === "Wirkleistung")  bySensor[device][kanal].Wirkleistung = row._value;
+            else if (field === "Spannung")      bySensor[device][kanal].Spannung     = row._value;
+            else if (field === "Energie")       bySensor[device][kanal].Energie      = row._value;
 
             const t = new Date(row._time).getTime();
             if (!bySensor[device][kanal].updatedAt || t > bySensor[device][kanal].updatedAt) {
@@ -295,11 +299,15 @@ app.get("/sensors-discovery", async (req, res) => {
             }
         });
 
-        // Construire un résultat trié : sensors par numéro, kanaux par numéro
+        // Construire un résultat trié : "Netz"/"Sensor0" (tension) en premier, puis
+        // Sensor1, Sensor2, ... par numéro croissant.
         const sensorNames = Object.keys(bySensor).sort((a, b) => {
-            const na = parseInt(a.replace("Sensor", ""), 10) || 0;
-            const nb = parseInt(b.replace("Sensor", ""), 10) || 0;
-            return na - nb;
+            const rank = (name) => {
+                if (name === "Netz" || name === "Sensor0") return -1;
+                const n = parseInt(name.replace("Sensor", ""), 10);
+                return isNaN(n) ? 999 : n;
+            };
+            return rank(a) - rank(b);
         });
 
         const result = sensorNames.map(device => {
@@ -320,7 +328,7 @@ app.get("/sensors-discovery", async (req, res) => {
 app.get("/sensor-history/:device/:kanal", async (req, res) => {
     const { device, kanal } = req.params;
     const metric = req.query.metric || "Strom";
-    const allowedMetrics = ["Strom", "Wirkleistung", "Energie"];
+    const allowedMetrics = ["Strom", "Wirkleistung", "Spannung", "Energie"];
     if (!allowedMetrics.includes(metric)) {
         return res.status(400).json({ error: "Ungültige Messgröße" });
     }
@@ -331,10 +339,10 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
           |> range(start: -${duration})
-          |> filter(fn: (r) => r._measurement == "sensoren")
+          |> filter(fn: (r) => r._measurement == "sensoren1")
           |> filter(fn: (r) => r.Device == "${device}")
           |> filter(fn: (r) => r.Kanal  == "${kanal}")
-          |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Energie")
+          |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Spannung" or r._field == "Energie")
           |> aggregateWindow(every: 10s, fn: mean, createEmpty: false)
           |> sort(columns: ["_time"])
     `;
@@ -347,6 +355,7 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
             if (!pointsByTime[t]) pointsByTime[t] = { time: t };
             if      (row._field === "Strom")        pointsByTime[t].Strom        = row._value;
             else if (row._field === "Wirkleistung") pointsByTime[t].Wirkleistung = row._value;
+            else if (row._field === "Spannung")     pointsByTime[t].Spannung     = row._value;
             else if (row._field === "Energie")      pointsByTime[t].Energie      = row._value;
         });
         const data = Object.values(pointsByTime).sort((a, b) => new Date(a.time) - new Date(b.time));
@@ -494,7 +503,7 @@ app.post("/energy-values/set", async (req, res) => {
             // 2. Ecrire dans InfluxDB via mapping
             const map = channelMapping[ch];
             if (map) {
-                const point = new Point("sensoren")
+                const point = new Point("sensoren1")
                     .tag("Device", map.device)
                     .tag("Kanal",  map.kanal)
                     .floatField("Energie", newTemp)
