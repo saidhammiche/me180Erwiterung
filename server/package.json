@@ -11,6 +11,7 @@
   "description": "",
   "dependencies": {
     "@influxdata/influxdb-client": "^1.35.0",
+    "axios": "^1.18.1",
     "cors": "^2.8.6",
     "express": "^5.2.1"
   }
