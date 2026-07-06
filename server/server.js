@@ -7,19 +7,32 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ✅ Route de healthcheck pour Docker
+app.get("/health", (req, res) => res.status(200).send("ok"));
+
 // ========== INFLUXDB ==========
-const INFLUX_URL    = "http://192.168.1.20:8086";
-const INFLUX_TOKEN  = "k_L6krRa3thn59MPAVH8bID-oO65diQfYS9ayMMrss53kGULbrE63Jw-a_y4e8xyZbzaqG_nindLwtNbLI48ZA==";
-const INFLUX_ORG    = "home";
-const INFLUX_BUCKET = "ACAL";
+const INFLUX_URL    = process.env.INFLUX_URL;
+const INFLUX_TOKEN  = process.env.INFLUX_TOKEN;
+const INFLUX_ORG    = process.env.INFLUX_ORG;
+const INFLUX_BUCKET = process.env.INFLUX_BUCKET;
+
+if (!INFLUX_TOKEN || !INFLUX_URL || !INFLUX_ORG || !INFLUX_BUCKET) {
+    console.error("❌ ERREUR: Variables InfluxDB manquantes. Vérifiez votre fichier .env");
+    process.exit(1);
+}
 
 const influxDB = new InfluxDB({ url: INFLUX_URL, token: INFLUX_TOKEN });
 const queryApi = influxDB.getQueryApi(INFLUX_ORG);
 const writeApi = influxDB.getWriteApi(INFLUX_ORG, INFLUX_BUCKET);
 
 // ========== MESSKOFFER ==========
-const MESSE_IP = "192.168.1.7";
-const MESSE_ID = "51105";
+const MESSE_IP = process.env.MESSE_IP;
+const MESSE_ID = process.env.MESSE_ID;
+
+if (!MESSE_IP || !MESSE_ID) {
+    console.error("❌ ERREUR: Variables Messkoffer manquantes. Vérifiez votre fichier .env");
+    process.exit(1);
+}
 
 const channelsList = Array.from({ length: 18 }, (_, i) => `CH${i + 1}`);
 

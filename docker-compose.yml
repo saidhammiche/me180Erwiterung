@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  server:
+    build: ./server
+    container_name: app-server
+    ports:
+      - "4000:4000"
+    env_file:
+      - ./server/.env
+    restart: always
+    networks:
+      - app-network
+
+  client:
+    build: ./client
+    container_name: app-client
+    ports:
+      - "5000:5000"
+    restart: always
+    depends_on:
+      - server
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
