@@ -350,9 +350,9 @@ const ChannelConfigManager = () => {
 
   const entries = Object.entries(config).filter(([key]) => !key.startsWith("L"));
   const groups  = [
-    { channels: entries.slice(0, 6),   bgColor: "#e3f2fd", title: "Kanäle 1-6"   },
-    { channels: entries.slice(6, 12),  bgColor: "#e8f5e9", title: "Kanäle 7-12"  },
-    { channels: entries.slice(12, 18), bgColor: "#fff3e0", title: "Kanäle 13-18" },
+    { channels: entries.slice(0, 6),   bgColor: "#f4f7f9", title: "Kanäle 1-6"   },
+    { channels: entries.slice(6, 12),  bgColor: "#eef2f5", title: "Kanäle 7-12"  },
+    { channels: entries.slice(12, 18), bgColor: "#f8f9fa", title: "Kanäle 13-18" },
   ];
 
   return (
@@ -500,9 +500,9 @@ const EnergyManager = () => {
   const selectedCount = selectedEnergyChannels.length;
   const totalCount    = allChannels.length;
   const groups      = [
-    { channels: entries.slice(0, 6),   bgColor: "#e3f2fd", title: "Kanäle 1-6"   },
-    { channels: entries.slice(6, 12),  bgColor: "#e8f5e9", title: "Kanäle 7-12"  },
-    { channels: entries.slice(12, 18), bgColor: "#fff3e0", title: "Kanäle 13-18" },
+    { channels: entries.slice(0, 6),   bgColor: "#f4f7f9", title: "Kanäle 1-6"   },
+    { channels: entries.slice(6, 12),  bgColor: "#eef2f5", title: "Kanäle 7-12"  },
+    { channels: entries.slice(12, 18), bgColor: "#f8f9fa", title: "Kanäle 13-18" },
   ];
 
   return (
