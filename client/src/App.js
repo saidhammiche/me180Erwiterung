@@ -1012,7 +1012,7 @@ function App() {
   const shouldShowTrendChannel = ch  => trendSelectedChannels.length === 0 || trendSelectedChannels.includes(ch);
   const shouldShowTrendMetric  = key => trendSelectedMetrics.length === 0  || trendSelectedMetrics.includes(key);
 
-  const grafanaUrl = "http://192.168.1.20:3000/d/adlddrl/monitoring-des-stromverbrauchs-e28093-me180e2809c?orgId=1&from=now-15m&to=now&timezone=browser&refresh=5s";
+  const grafanaUrl = "http://192.168.1.20:3000/d/admzg79/energie?orgId=1&from=now-30m&to=now&timezone=browser&var-kanal=CH1&refresh=5s";
 
   // ── NavBar ──
   const NavBar = () => (
