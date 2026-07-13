@@ -585,6 +585,34 @@ function computeApparentAndReactive(P, cosPhi) {
 const MEGO_MEASUREMENT = "mego";
 const MEGO_DEVICE      = "mE180";
 
+// ========== HISTORIQUE ENERGIE (écriture périodique dans InfluxDB) ==========
+// ✅ Ajouté sur demande : l'Energie (Messkoffer) n'avait pas d'historique car
+// jamais écrite dans InfluxDB. On l'écrit ici régulièrement dans le measurement
+// "mego" (mêmes tags Device/Kanal/Label que les autres champs) afin que
+// /history puisse la relire et l'afficher dans l'onglet Trends.
+const ENERGY_HISTORY_INTERVAL_MS = 30000;
+
+async function writeEnergyHistoryPoints() {
+    try {
+        const { temporary } = await getEnergiesFromMesskoffer();
+        for (const ch of channelsList) {
+            const value = temporary[ch];
+            if (value === undefined || value === null || isNaN(value)) continue;
+            const point = new Point(MEGO_MEASUREMENT)
+                .tag("Device", MEGO_DEVICE)
+                .tag("Kanal",  ch)
+                .tag("Label",  channelConfig[ch]?.label || ch)
+                .floatField("Energie", value)
+                .timestamp(new Date());
+            writeApi.writePoint(point);
+        }
+        await writeApi.flush();
+    } catch (err) {
+        console.error("[EnergyHistory] Fehler beim Schreiben:", err.message);
+    }
+}
+setInterval(writeEnergyHistoryPoints, ENERGY_HISTORY_INTERVAL_MS);
+
 app.get("/data", async (req, res) => {
     try {
         // ✅ énergies depuis Messkoffer (inchangé)
@@ -681,9 +709,9 @@ app.get("/data", async (req, res) => {
 
 // ========== ROUTE HISTORY ==========
 // ✅ Source désormais : measurement "mego", Device "mE180", filtré par Kanal=CHx
-// et Label=<label CGI actuel du canal>. Energie n'est plus lue depuis InfluxDB ici
-// (le Messkoffer/cache local ne fournit pas d'historique, donc Energie_temp n'apparaît
-// plus dans l'historique pour les canaux migrés vers mego).
+// et Label=<label CGI actuel du canal>.
+// ✅ Energie (Energie_temp) incluse : écrite périodiquement dans mego par
+// writeEnergyHistoryPoints() ci-dessus, donc désormais disponible dans Trends.
 
 app.get("/history/:channel", async (req, res) => {
     const { channel } = req.params;
@@ -705,7 +733,7 @@ app.get("/history/:channel", async (req, res) => {
           |> filter(fn: (r) => r.Device == "${MEGO_DEVICE}")
           |> filter(fn: (r) => r.Kanal  == "${ch}")
           |> filter(fn: (r) => r.Label  == "${safeLabel}")
-          |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor")
+          |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor" or r._field == "Energie")
           |> aggregateWindow(every: 10s, fn: mean, createEmpty: false)
           |> sort(columns: ["_time"])
     `;
@@ -719,6 +747,7 @@ app.get("/history/:channel", async (req, res) => {
             if      (row._field === "Strom")          pointsByTime[t].Strom        = row._value;
             else if (row._field === "Wirkleistung")   pointsByTime[t].Wirkleistung = row._value;
             else if (row._field === "Leistungsfaktor") pointsByTime[t].CosinusPhi  = row._value;
+            else if (row._field === "Energie")         pointsByTime[t].Energie_temp = row._value;
         });
         const data = Object.values(pointsByTime)
             .map(point => {
