@@ -266,7 +266,7 @@ app.get("/sensors-discovery", async (req, res) => {
         const fluxQuery = `
             from(bucket: "${INFLUX_BUCKET}")
               |> range(start: 0)
-              |> filter(fn: (r) => r["_measurement"] == "sensoren1")
+              |> filter(fn: (r) => r["_measurement"] == "sensoren")
               |> filter(fn: (r) => r["_field"] == "Strom" or r["_field"] == "Wirkleistung" or r["_field"] == "Energie" or r["_field"] == "Spannung")
               |> last()
         `;
@@ -339,7 +339,7 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
           |> range(start: -${duration})
-          |> filter(fn: (r) => r._measurement == "sensoren1")
+          |> filter(fn: (r) => r._measurement == "sensoren")
           |> filter(fn: (r) => r.Device == "${device}")
           |> filter(fn: (r) => r.Kanal  == "${kanal}")
           |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Spannung" or r._field == "Energie")
@@ -525,7 +525,7 @@ app.post("/energy-values/set", async (req, res) => {
             // 2. Ecrire dans InfluxDB via mapping
             const map = channelMapping[ch];
             if (map) {
-                const point = new Point("sensoren1")
+                const point = new Point("sensoren")
                     .tag("Device", map.device)
                     .tag("Kanal",  map.kanal)
                     .floatField("Energie", newTemp)
