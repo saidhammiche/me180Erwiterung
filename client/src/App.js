@@ -613,6 +613,7 @@ const MAPPING_METRIC_LABELS = {
   Energie:      "Energie (kWh)",
 };
 const KANAL_LABELS = { "1": "L1", "2": "L2", "3": "L3", "4": "N" };
+const KANAL_OPTIONS = ["1", "2", "3", "4"];
 
 // ─── MAPPING DETAIL (historique d'un Sensor/Kanal, style GraphDetail) ───────
 const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
@@ -747,8 +748,8 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
 
 // ─── MAPPING MANAGER (boxes style Echtzeit + filtres + détail) ──────────────
 // Découverte dynamique des Sensor/Kanal réellement présents dans InfluxDB.
-// Affichage en boxes par Sensor (comme ChannelCard de Echtzeit), avec FilterBar
-// (Sensors + Messgrößen), cliquables vers un détail (historique + résumé).
+// Affichage en boxes par Sensor (comme ChannelCard de Echtzeit), avec filtres
+// Sensoren / Kanal / Messgrößen, cliquables vers un détail (historique + résumé).
 // Rafraîchissement uniquement manuel (bouton "Aktualisieren"), pas de polling.
 const MappingManager = () => {
   const [sensors, setSensors]                       = useState([]);
@@ -758,6 +759,8 @@ const MappingManager = () => {
   const [messageType, setMessageType]                = useState("success");
   const [selectedSensors, setSelectedSensors]       = useState([]);
   const [selectedMappingMetrics, setSelectedMappingMetrics] = useState([]);
+  const [selectedKanaele, setSelectedKanaele]       = useState([]);
+  const [kanalAnchorEl, setKanalAnchorEl]           = useState(null);
   const [detailDevice, setDetailDevice]             = useState(null);
   const isMobile = useMediaQuery("(max-width:600px)");
 
@@ -795,16 +798,27 @@ const MappingManager = () => {
   };
 
   const allDeviceNames = otherSensors.map(s => s.device);
-  const hasActiveFilters = selectedSensors.length > 0 || selectedMappingMetrics.length > 0;
+  const hasActiveFilters = selectedSensors.length > 0 || selectedMappingMetrics.length > 0 || selectedKanaele.length > 0;
 
   const handleSensorChange     = useCallback(e => setSelectedSensors(e.target.value), []);
   const handleSelectAllSensors = useCallback(() => setSelectedSensors(prev => prev.length === allDeviceNames.length ? [] : [...allDeviceNames]), [allDeviceNames]);
   const handleMetricChange     = useCallback(e => setSelectedMappingMetrics(e.target.value), []);
   const handleSelectAllMetrics = useCallback(() => setSelectedMappingMetrics(prev => prev.length === MAPPING_METRIC_OPTIONS.length ? [] : MAPPING_METRIC_OPTIONS.map(m => m.value)), []);
-  const resetMappingFilters    = useCallback(() => { setSelectedSensors([]); setSelectedMappingMetrics([]); }, []);
+  const resetMappingFilters    = useCallback(() => { setSelectedSensors([]); setSelectedMappingMetrics([]); setSelectedKanaele([]); }, []);
+
+  // ✅ Filtre Kanal (indépendant de Sensoren et Messgrößen)
+  const handleKanalToggle = (k) => {
+    setSelectedKanaele(prev => prev.includes(k) ? prev.filter(x => x !== k) : [...prev, k]);
+  };
+  const handleSelectAllKanaele = () => {
+    setSelectedKanaele(prev => prev.length === KANAL_OPTIONS.length ? [] : [...KANAL_OPTIONS]);
+  };
+  const selKaCount = selectedKanaele.length;
+  const totKaCount = KANAL_OPTIONS.length;
 
   const shouldShowSensor = device => selectedSensors.length === 0 || selectedSensors.includes(device);
   const shouldShowMetric = key    => selectedMappingMetrics.length === 0 || selectedMappingMetrics.includes(key);
+  const shouldShowKanal   = kanal  => selectedKanaele.length === 0 || selectedKanaele.includes(kanal);
 
   if (detailDevice) {
     const sensorObj = otherSensors.find(s => s.device === detailDevice);
@@ -824,7 +838,7 @@ const MappingManager = () => {
   if (loading) return <Typography sx={{ p: 3 }}>Sensoren werden erkannt...</Typography>;
 
   const visibleSensors = otherSensors.filter(s => shouldShowSensor(s.device));
-  const showNetzBox = Boolean(netzDevice) && (selectedSensors.length === 0) && shouldShowMetric("Spannung");
+  const showNetzBox = Boolean(netzDevice) && (selectedSensors.length === 0) && shouldShowMetric("Spannung") && shouldShowKanal("1") && shouldShowKanal("2") && shouldShowKanal("3");
 
   return (
     <>
@@ -840,6 +854,29 @@ const MappingManager = () => {
               onMetricChange={handleMetricChange} onSelectAllMetrics={handleSelectAllMetrics}
               onResetFilters={resetMappingFilters} hasActiveFilters={hasActiveFilters}
               orderedChannels={allDeviceNames} metricOptions={MAPPING_METRIC_OPTIONS} mobileDrawer />
+
+            {/* ✅ Filtre Kanal indépendant (1/2/3/4 → L1/L2/L3/N) */}
+            <Button variant="outlined" onClick={e => { e.stopPropagation(); setKanalAnchorEl(e.currentTarget); }}
+              endIcon={<span>▼</span>} sx={{ minWidth: 150, borderRadius: 2, textTransform: "none" }}>
+              {selKaCount === 0 || selKaCount === totKaCount ? "Alle Kanäle" : `${selKaCount} Kanäle`}
+            </Button>
+            <Popover open={Boolean(kanalAnchorEl)} anchorEl={kanalAnchorEl}
+              onClose={() => setKanalAnchorEl(null)}
+              anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
+              disableAutoFocus disableEnforceFocus keepMounted>
+              <Box sx={{ p: 2, minWidth: 220, maxWidth: 300 }}>
+                <FormControlLabel
+                  control={<Checkbox checked={selKaCount === totKaCount} indeterminate={selKaCount > 0 && selKaCount < totKaCount} onChange={handleSelectAllKanaele} />}
+                  label="Alle Kanäle" />
+                <Divider sx={{ my: 1 }} />
+                {KANAL_OPTIONS.map(k => (
+                  <FormControlLabel key={k}
+                    control={<Checkbox checked={selectedKanaele.includes(k)} onChange={() => handleKanalToggle(k)} />}
+                    label={`${KANAL_LABELS[k] || k} (Kanal ${k})`} sx={{ display: "block" }} />
+                ))}
+              </Box>
+            </Popover>
+
             <Button variant="outlined" onClick={() => loadSensors(true)} disabled={refreshing} startIcon={<UpdateIcon />}
               style={{ borderRadius: 20, textTransform: "none" }}>
               {refreshing ? "Aktualisieren..." : "Aktualisieren"}
@@ -875,8 +912,9 @@ const MappingManager = () => {
         <div style={{ display: "flex", gap: 15, flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>
           {visibleSensors.map(({ device, kanaele }) => {
             const cardMetrics = MAPPING_METRIC_OPTIONS.filter(m => m.value !== "Spannung");
+            const visibleKanaele = kanaele.filter(k => shouldShowKanal(k.kanal));
             const visibleMetricsExist = cardMetrics.some(m => shouldShowMetric(m.value));
-            if (!visibleMetricsExist) return null;
+            if (!visibleMetricsExist || visibleKanaele.length === 0) return null;
             return (
               <Paper key={device} elevation={1} onClick={() => setDetailDevice(device)}
                 style={{ padding: 10, backgroundColor: "#fff", borderRadius: 8, cursor: "pointer",
@@ -887,10 +925,10 @@ const MappingManager = () => {
                 <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1 }}>
                   <DeviceHubIcon style={{ color: PRIMARY_COLOR, fontSize: "0.9rem" }} />
                   <Typography variant="subtitle2" style={{ fontWeight: 600, color: PRIMARY_COLOR, fontSize: "0.85rem" }}>{device}</Typography>
-                  <Typography variant="caption" style={{ color: "#888", flex: 1, textAlign: "right" }}>{kanaele.length} Kanäle</Typography>
+                  <Typography variant="caption" style={{ color: "#888", flex: 1, textAlign: "right" }}>{visibleKanaele.length} Kanäle</Typography>
                 </Box>
                 <Divider style={{ marginBottom: 8, backgroundColor: "#e0e0e0" }} />
-                {kanaele.map(k => (
+                {visibleKanaele.map(k => (
                   <Box key={k.kanal} sx={{ mb: "8px" }}>
                     <Typography variant="caption" style={{ color: "#666", fontWeight: 600 }}>
                       {KANAL_LABELS[k.kanal] || k.kanal} (Kanal {k.kanal})

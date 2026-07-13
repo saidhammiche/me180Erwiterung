@@ -366,6 +366,28 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
     }
 });
 
+// ========== ROUTE DEBUG TEMPORAIRE (diagnostic mego) ==========
+// ⚠️ Route de diagnostic uniquement, à supprimer une fois le problème résolu.
+// Retourne les 20 dernières lignes brutes du champ "Strom" du measurement "mego",
+// sans AUCUN filtre Device/Kanal/Label, pour voir les vraies valeurs des tags en base.
+app.get("/debug-mego", async (req, res) => {
+    const fluxQuery = `
+        from(bucket: "${INFLUX_BUCKET}")
+          |> range(start: -24h)
+          |> filter(fn: (r) => r["_measurement"] == "mego")
+          |> filter(fn: (r) => r["_field"] == "Strom")
+          |> keep(columns: ["_time", "_value", "Device", "Kanal", "Label"])
+          |> limit(n: 20)
+    `;
+    try {
+        const rows = await queryApi.collectRows(fluxQuery);
+        res.json({ count: rows.length, rows });
+    } catch (err) {
+        console.error("/debug-mego error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ========== ROUTES MESSKOFFER DIREKT ==========
 
 app.get("/messkoffer/labels", async (req, res) => {
@@ -597,7 +619,7 @@ app.get("/data", async (req, res) => {
                   |> filter(fn: (r) => r.Device == "${MEGO_DEVICE}")
                   |> filter(fn: (r) => r.Kanal  == "${ch}")
                   |> filter(fn: (r) => r.Label  == "${safeLabel}")
-                  |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "leistungsfaktor")
+                  |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor")
                   |> last()
             `;
         });
@@ -615,7 +637,7 @@ app.get("/data", async (req, res) => {
             results[idx].forEach(row => {
                 if      (row._field === "Strom")          data_.Strom        = row._value;
                 else if (row._field === "Wirkleistung")   data_.Wirkleistung = row._value;
-                else if (row._field === "leistungsfaktor") data_.CosinusPhi  = row._value;
+                else if (row._field === "Leistungsfaktor") data_.CosinusPhi  = row._value;
             });
             byChannel[ch] = data_;
         });
@@ -683,7 +705,7 @@ app.get("/history/:channel", async (req, res) => {
           |> filter(fn: (r) => r.Device == "${MEGO_DEVICE}")
           |> filter(fn: (r) => r.Kanal  == "${ch}")
           |> filter(fn: (r) => r.Label  == "${safeLabel}")
-          |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "leistungsfaktor")
+          |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor")
           |> aggregateWindow(every: 10s, fn: mean, createEmpty: false)
           |> sort(columns: ["_time"])
     `;
@@ -696,7 +718,7 @@ app.get("/history/:channel", async (req, res) => {
             if (!pointsByTime[t]) pointsByTime[t] = { time: t };
             if      (row._field === "Strom")          pointsByTime[t].Strom        = row._value;
             else if (row._field === "Wirkleistung")   pointsByTime[t].Wirkleistung = row._value;
-            else if (row._field === "leistungsfaktor") pointsByTime[t].CosinusPhi  = row._value;
+            else if (row._field === "Leistungsfaktor") pointsByTime[t].CosinusPhi  = row._value;
         });
         const data = Object.values(pointsByTime)
             .map(point => {
