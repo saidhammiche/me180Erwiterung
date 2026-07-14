@@ -73,6 +73,20 @@ function initConfig() {
 }
 initConfig();
 
+// ========== KUNDENDATEN LABELS (Bezeichnung par Sensor/Kanal, distinct de la config CH) ==========
+// ✅ Nouveau : stockage de la "Bezeichnung" utilisée dans l'interface Kundendaten.
+// Indépendant de channelConfig (Kanal Konfiguration), qui gère label/schwellwert/hoechstwert
+// par canal physique CHx. Ici la clé est Sensor+Kanal (ex: "Sensor1_1"), vide par défaut.
+let kundenLabels = {};
+
+function getKundenLabelKey(device, kanal) {
+    return `${device}_${kanal}`;
+}
+
+function getKundenLabel(device, kanal) {
+    return kundenLabels[getKundenLabelKey(device, kanal)] || "";
+}
+
 // ========== MESSKOFFER CGI HELPERS ==========
 
 async function getLabelsFromMesskoffer() {
@@ -254,12 +268,33 @@ app.post("/mapping", (req, res) => {
     res.json({ success: true, mapping: channelMapping });
 });
 
+// ========== ROUTES KUNDENDATEN (Bezeichnung par Sensor/Kanal) ==========
+// ✅ Nouveau : lecture/écriture de la Bezeichnung utilisée dans l'interface Kundendaten.
+// Aucun champ Max/Min ici, uniquement la Bezeichnung (contrairement à /config).
+
+app.get("/kundendaten-labels", (req, res) => {
+    res.json(kundenLabels);
+});
+
+app.post("/kundendaten-labels", (req, res) => {
+    const { device, kanal, label } = req.body;
+    if (!device || kanal === undefined || kanal === null) {
+        return res.status(400).json({ error: "device und kanal erforderlich" });
+    }
+    const key = getKundenLabelKey(device, String(kanal));
+    kundenLabels[key] = label !== undefined ? String(label) : "";
+    console.log(`[Kundendaten] Bezeichnung aktualisiert: ${key} = "${kundenLabels[key]}"`);
+    res.json({ success: true, device, kanal: String(kanal), label: kundenLabels[key] });
+});
+
 // ========== ROUTE DECOUVERTE DYNAMIQUE SENSOR/KANAL (nouvel onglet Mapping) ==========
 // Interroge InfluxDB sans limite de temps fixe pour lister tous les Device/Kanal
 // réellement présents dans le bucket, avec leurs dernières valeurs Strom / Wirkleistung /
 // Spannung / Energie.
 // ✅ Spannung ajoutée : le device "Netz" (anciennement "Sensor0") porte la tension du
 // réseau sur les Kanal 1/2/3 (L1/L2/L3) ; il n'est plus exclu du résultat.
+// ✅ Bezeichnung ajoutée : label Kundendaten (vide par défaut) par Sensor/Kanal, pour
+// alimenter directement l'interface Kundendaten sans requête supplémentaire.
 
 app.get("/sensors-discovery", async (req, res) => {
     try {
@@ -311,7 +346,9 @@ app.get("/sensors-discovery", async (req, res) => {
         });
 
         const result = sensorNames.map(device => {
-            const kanaux = Object.values(bySensor[device]).sort((a, b) => parseInt(a.kanal, 10) - parseInt(b.kanal, 10));
+            const kanaux = Object.values(bySensor[device])
+                .sort((a, b) => parseInt(a.kanal, 10) - parseInt(b.kanal, 10))
+                .map(k => ({ ...k, Bezeichnung: getKundenLabel(device, k.kanal) }));
             return { device, kanaele: kanaux };
         });
 

@@ -405,6 +405,144 @@ const ChannelConfigManager = () => {
   );
 };
 
+// ─── SENSOR-BEZEICHNUNG (Kundendaten) ────────────────────────────────────────
+// ✅ Nouvelle vue : même mise en page/style que ChannelConfigManager ci-dessus
+// (Paper, tableau, groupes colorés, bouton "Alle speichern"), mais appliquée
+// aux Sensoren découverts dynamiquement (via /sensors-discovery), 4 Kanal
+// (1-4) par Sensor, avec UNIQUEMENT la Bezeichnung — pas de Schwellwert/
+// Höchstwert. Enregistrement via /kundendaten-labels (backend port 4000).
+const SensorConfigManager = () => {
+  const [sensors, setSensors]         = useState([]);
+  const [labels, setLabels]           = useState({});
+  const [loading, setLoading]         = useState(true);
+  const [saving, setSaving]           = useState(false);
+  const [message, setMessage]         = useState("");
+  const [messageType, setMessageType] = useState("success");
+  const isMobile = useMediaQuery("(max-width:600px)");
+
+  const loadSensors = async () => {
+    try {
+      const controller = new AbortController();
+      const timeoutId  = setTimeout(() => controller.abort(), 5000);
+      const res        = await axios.get(`${API_BASE_URL}/sensors-discovery`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      const list = res.data?.sensors || [];
+      setSensors(list);
+      setLabels(prev => {
+        const next = { ...prev };
+        list.forEach(s => {
+          s.kanaele.forEach(k => {
+            const key = `${s.device}_${k.kanal}`;
+            if (next[key] === undefined) next[key] = k.Bezeichnung || "";
+          });
+        });
+        return next;
+      });
+    } catch (err) {
+      setMessageType("error");
+      setMessage(err.name === "AbortError"
+        ? "❌ Zeitüberschreitung: Server antwortet nicht."
+        : "❌ Fehler beim Laden der Sensoren: " + (err.message || "Netzwerkproblem"));
+      setTimeout(() => setMessage(""), 5000);
+    } finally { setLoading(false); }
+  };
+
+  useEffect(() => { loadSensors(); }, []);
+
+  const handleChange = (device, kanal, value) =>
+    setLabels(prev => ({ ...prev, [`${device}_${kanal}`]: value }));
+
+  const saveAll = async () => {
+    setSaving(true);
+    try {
+      const requests = [];
+      sensors.filter(s => s.device !== "Netz" && s.device !== "Sensor0").forEach(s => {
+        ["1", "2", "3", "4"].forEach(kanal => {
+          const key = `${s.device}_${kanal}`;
+          requests.push(
+            axios.post(`${API_BASE_URL}/kundendaten-labels`, {
+              device: s.device, kanal, label: labels[key] || ""
+            })
+          );
+        });
+      });
+      await Promise.all(requests);
+      setMessageType("success");
+      setMessage("✅ Bezeichnungen erfolgreich gespeichert");
+      setTimeout(() => setMessage(""), 3000);
+      await loadSensors();
+    } catch {
+      setMessageType("error");
+      setMessage("❌ Fehler beim Speichern der Bezeichnungen");
+      setTimeout(() => setMessage(""), 3000);
+    } finally { setSaving(false); }
+  };
+
+  if (loading) return <Typography>Sensoren werden geladen...</Typography>;
+
+  // ✅ "Netz"/"Sensor0" exclu : ce device ne porte que la tension (Spannung),
+  // pas de Bezeichnung client à gérer ici.
+  const realSensors = sensors.filter(s => s.device !== "Netz" && s.device !== "Sensor0");
+
+  const groups = realSensors.map((s, idx) => ({
+    device:  s.device,
+    bgColor: ["#f4f7f9", "#eef2f5", "#f8f9fa"][idx % 3],
+    kanaele: ["1", "2", "3", "4"].map(kanal => ({
+      kanal,
+      exists: s.kanaele.some(k => k.kanal === kanal)
+    }))
+  }));
+
+  return (
+    <Paper elevation={2} sx={{ p: 3, mt: 3 }}>
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2} flexWrap="wrap" gap={1}>
+        <Typography variant="h5">Sensor-Bezeichnung</Typography>
+        <Button variant="contained" onClick={saveAll} disabled={saving} startIcon={<SaveIcon />}>
+          {saving ? "Speichern..." : "Alle speichern"}
+        </Button>
+      </Box>
+      {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2 }}>{message}</Alert>}
+      {groups.length === 0 ? (
+        <Typography color="text.secondary">Keine aktiven Sensoren gefunden.</Typography>
+      ) : groups.map((group) => (
+        <Box key={group.device} sx={{ mb: 3, p: 2, borderRadius: 2, backgroundColor: group.bgColor, overflowX: "auto" }}>
+          <Typography variant="subtitle1" fontWeight="bold" sx={{ mb: 1 }}>{group.device}</Typography>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 400 : "auto" }}>
+            <thead>
+              <tr style={{ backgroundColor: "rgba(0,0,0,0.05)" }}>
+                <th style={{ padding: "12px", textAlign: "left" }}>Kanal</th>
+                <th style={{ padding: "12px", textAlign: "left" }}>Bezeichnung</th>
+              </tr>
+            </thead>
+            <tbody>
+              {group.kanaele.map(({ kanal, exists }) => {
+                const key = `${group.device}_${kanal}`;
+                return (
+                  <tr key={key} style={{ borderBottom: "1px solid #e0e0e0", borderLeft: `4px solid ${KANAL_COLORS[kanal] || "#999"}` }}>
+                    <td style={{ padding: "8px", fontWeight: "bold" }}>
+                      <Box display="flex" alignItems="center" gap={1}>
+                        <Box sx={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: KANAL_COLORS[kanal] || "#999", flexShrink: 0 }} />
+                        Kanal {kanal}
+                      </Box>
+                    </td>
+                    <td style={{ padding: "8px" }}>
+                      <TextField size="small" value={labels[key] || ""}
+                        onChange={e => handleChange(group.device, kanal, e.target.value)}
+                        fullWidth variant="outlined" disabled={!exists}
+                        placeholder={exists ? "Bezeichnung" : "Kein Signal"}
+                        InputProps={{ style: { color: "#000", fontSize: "1rem", fontWeight: 600, backgroundColor: "#f5f5f5" } }} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </Box>
+      ))}
+    </Paper>
+  );
+};
+
 // ─── ENERGIE-MANAGER ──────────────────────────────────────────────────────────
 const EnergyManager = () => {
   const [energyData, setEnergyData]                         = useState({});
@@ -614,6 +752,9 @@ const MAPPING_METRIC_LABELS = {
 };
 const KANAL_LABELS = { "1": "L1", "2": "L2", "3": "L3", "4": "N" };
 const KANAL_OPTIONS = ["1", "2", "3", "4"];
+// ✅ Couleur spécifique par Kanal (1-4), utilisée pour repérer visuellement
+// chaque canal d'un Sensor (Sensor-Bezeichnung, Mapping/Kundendaten).
+const KANAL_COLORS = { "1": "#1976d2", "2": "#2e7d32", "3": "#e65100", "4": "#6a1b9a" };
 
 // ─── MAPPING DETAIL (historique d'un Sensor/Kanal, style GraphDetail) ───────
 const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
@@ -657,7 +798,10 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
 
         <Button variant="outlined" onClick={e => setKanalAnchorEl(e.currentTarget)}
           endIcon={<span>▼</span>} sx={{ minWidth: 130, textTransform: "none" }}>
-          {KANAL_LABELS[selectedKanal] || selectedKanal} (Kanal {selectedKanal})
+          <span style={{ fontWeight: currentKanalData.Bezeichnung ? 700 : 400, fontSize: currentKanalData.Bezeichnung ? "1.05rem" : "inherit" }}>
+            {currentKanalData.Bezeichnung ? currentKanalData.Bezeichnung : (KANAL_LABELS[selectedKanal] || selectedKanal)}
+          </span>
+          &nbsp;(Kanal {selectedKanal})
         </Button>
         <Menu anchorEl={kanalAnchorEl} open={Boolean(kanalAnchorEl)} onClose={() => setKanalAnchorEl(null)}
           anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }}
@@ -666,7 +810,8 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
             <MenuItem key={k.kanal} onClick={e => { e.stopPropagation(); setSelectedKanal(k.kanal); }}
               selected={selectedKanal === k.kanal} sx={{ borderRadius: 1 }}>
               <Checkbox checked={selectedKanal === k.kanal} size="small" />
-              <ListItemText primary={`${KANAL_LABELS[k.kanal] || k.kanal} (Kanal ${k.kanal})`} />
+              <Box sx={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: KANAL_COLORS[k.kanal] || "#999", mr: 1 }} />
+              <ListItemText primary={`${k.Bezeichnung ? k.Bezeichnung : (KANAL_LABELS[k.kanal] || k.kanal)} (Kanal ${k.kanal})`} />
             </MenuItem>
           ))}
         </Menu>
@@ -929,10 +1074,16 @@ const MappingManager = () => {
                 </Box>
                 <Divider style={{ marginBottom: 8, backgroundColor: "#e0e0e0" }} />
                 {visibleKanaele.map(k => (
-                  <Box key={k.kanal} sx={{ mb: "8px" }}>
-                    <Typography variant="caption" style={{ color: "#666", fontWeight: 600 }}>
-                      {KANAL_LABELS[k.kanal] || k.kanal} (Kanal {k.kanal})
-                    </Typography>
+                  <Box key={k.kanal} sx={{ mb: "10px" }}>
+                    <Box display="flex" alignItems="center" gap={0.8} sx={{ mb: "2px" }}>
+                      <Box sx={{ width: 10, height: 10, borderRadius: "50%", backgroundColor: KANAL_COLORS[k.kanal] || "#999", flexShrink: 0 }} />
+                      <Typography variant="body1" style={{ color: "#222", fontWeight: 700, fontSize: "1.05rem", lineHeight: 1.2 }}>
+                        {k.Bezeichnung ? k.Bezeichnung : (KANAL_LABELS[k.kanal] || k.kanal)}
+                      </Typography>
+                      <Typography variant="caption" style={{ color: "#999" }}>
+                        (Kanal {k.kanal})
+                      </Typography>
+                    </Box>
                     {cardMetrics.map(m => {
                       if (!shouldShowMetric(m.value)) return null;
                       const Icon = m.icon;
@@ -985,7 +1136,9 @@ function App() {
     // ✅ "mapping" ajouté pour permettre l'accès direct via ?view=mapping
     // (l'onglet a été retiré de la NavBar, l'accès se fait désormais depuis
     // le portail externe, onglet "Einstellungen")
-    if (["config", "graphMenu", "dashboard", "energy", "mapping"].includes(viewParam)) setView(viewParam);
+    // ✅ "sensorconfig" ajouté : vue Sensor-Bezeichnung (Kundendaten), même
+    // principe que "mapping" — accessible uniquement via le portail externe.
+    if (["config", "graphMenu", "dashboard", "energy", "mapping", "sensorconfig"].includes(viewParam)) setView(viewParam);
   }, []);
 
   useEffect(() => {
@@ -1280,9 +1433,10 @@ function App() {
           onBack={() => setView("graphMenu")}
         />
       )}
-      {view === "config"  && <ChannelConfigManager />}
-      {view === "energy"  && <EnergyManager />}
-      {view === "mapping" && <MappingManager />}
+      {view === "config"       && <ChannelConfigManager />}
+      {view === "energy"       && <EnergyManager />}
+      {view === "mapping"      && <MappingManager />}
+      {view === "sensorconfig" && <SensorConfigManager />}
     </div>
   );
 }
