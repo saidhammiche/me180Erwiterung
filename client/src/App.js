@@ -543,6 +543,19 @@ const SensorConfigManager = () => {
   );
 };
 
+// ✅ Palette de couleurs professionnelles, une par canal (CH1-CH18), utilisée
+// dans Kanal Zähler pour repérer visuellement chaque canal.
+const CHANNEL_COLOR_PALETTE = [
+  "#1976d2", "#2e7d32", "#e65100", "#6a1b9a", "#00838f", "#c2185b",
+  "#5d4037", "#455a64", "#f9a825", "#00695c", "#4527a0", "#ad1457",
+  "#37474f", "#6d4c41", "#0277bd", "#558b2f", "#ef6c00", "#8e24aa",
+];
+const getChannelColor = (channel) => {
+  const num = parseInt(String(channel).replace(/\D/g, ""), 10);
+  if (isNaN(num)) return "#999";
+  return CHANNEL_COLOR_PALETTE[(num - 1) % CHANNEL_COLOR_PALETTE.length];
+};
+
 // ─── ENERGIE-MANAGER ──────────────────────────────────────────────────────────
 const EnergyManager = () => {
   const [energyData, setEnergyData]                         = useState({});
@@ -668,11 +681,27 @@ const EnergyManager = () => {
                 label="Alle Kanäle" />
               <Divider sx={{ my: 1 }} />
               <Box sx={{ maxHeight: 300, overflow: "auto" }}>
-                {allChannels.map(ch => (
-                  <FormControlLabel key={ch}
-                    control={<Checkbox checked={selectedEnergyChannels.includes(ch)} onChange={() => handleEnergyChannelToggle(ch)} />}
-                    label={energyData[ch]?.label || formatChannelName(ch)} sx={{ display: "block" }} />
-                ))}
+                {allChannels.map(ch => {
+                  const chLabel = energyData[ch]?.label;
+                  // ✅ Toujours afficher le canal (CH1, CH2...) ; la Bezeichnung est
+                  // ajoutée seulement si elle est définie et différente du nom du
+                  // canal — évite d'avoir plusieurs entrées vides/identiques quand
+                  // la Bezeichnung n'est pas encore renseignée.
+                  const displayText = (chLabel && chLabel !== ch)
+                    ? `${formatChannelName(ch)} – ${chLabel}`
+                    : formatChannelName(ch);
+                  return (
+                    <FormControlLabel key={ch}
+                      control={<Checkbox checked={selectedEnergyChannels.includes(ch)} onChange={() => handleEnergyChannelToggle(ch)} />}
+                      label={
+                        <Box display="flex" alignItems="center" gap={1}>
+                          <Box sx={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: getChannelColor(ch), flexShrink: 0 }} />
+                          <span>{displayText}</span>
+                        </Box>
+                      }
+                      sx={{ display: "block" }} />
+                  );
+                })}
               </Box>
             </Box>
           </Popover>
@@ -698,7 +727,7 @@ const EnergyManager = () => {
               <tr style={{ backgroundColor: "rgba(0,0,0,0.05)" }}>
                 <th style={{ padding: "8px", textAlign: "left" }}>Kanal</th>
                 <th style={{ padding: "8px", textAlign: "left" }}>Bezeichnung</th>
-                <th style={{ padding: "8px", textAlign: "center" }}>Energie temporär (kWh)</th>
+                <th style={{ padding: "8px", textAlign: "center" }}>Energie (kWh)</th>
                 <th style={{ padding: "8px", textAlign: "center" }}>Letzte Änderung</th>
               </tr>
             </thead>
@@ -707,8 +736,13 @@ const EnergyManager = () => {
                 const isSelected  = selectedEnergyChannels.includes(channel);
                 const lastUpdated = data_?.updatedAt ? new Date(data_.updatedAt) : null;
                 return (
-                  <tr key={channel} style={{ borderBottom: "1px solid #e0e0e0", backgroundColor: isSelected ? "rgba(44,122,77,0.1)" : "transparent" }}>
-                    <td style={{ padding: "8px", fontWeight: "bold" }}>{formatChannelName(channel)}</td>
+                  <tr key={channel} style={{ borderBottom: "1px solid #e0e0e0", borderLeft: `4px solid ${getChannelColor(channel)}`, backgroundColor: isSelected ? "rgba(44,122,77,0.1)" : "transparent" }}>
+                    <td style={{ padding: "8px", fontWeight: "bold" }}>
+                      <Box display="flex" alignItems="center" gap={1}>
+                        <Box sx={{ width: 10, height: 10, borderRadius: "50%", backgroundColor: getChannelColor(channel), flexShrink: 0 }} />
+                        {formatChannelName(channel)}
+                      </Box>
+                    </td>
                     <td style={{ padding: "8px" }}>
                       <Typography variant="body2" sx={{ fontWeight: 600, color: "#000" }}>{data_?.label || formatChannelName(channel)}</Typography>
                     </td>
