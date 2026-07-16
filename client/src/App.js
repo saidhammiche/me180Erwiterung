@@ -64,9 +64,10 @@ const TIME_RANGE_OPTIONS = [
 ];
 
 const formatValue = (value, decimals = 3, unit = "") => {
-  if (value === undefined || value === null) return "—";
-  const num = parseFloat(value);
-  if (isNaN(num)) return "—";
+  // ✅ MODIFIÉ : au lieu d'afficher "—" quand il n'y a pas de valeur (null/undefined/NaN),
+  // on affiche "0" formaté (avec les mêmes décimales et unité qu'une vraie valeur).
+  let num = parseFloat(value);
+  if (value === undefined || value === null || isNaN(num)) num = 0;
   return `${num.toFixed(decimals)}${unit ? " " + unit : ""}`;
 };
 
@@ -941,12 +942,17 @@ const MappingManager = () => {
   const [selectedKanaele, setSelectedKanaele]       = useState([]);
   const [kanalAnchorEl, setKanalAnchorEl]           = useState(null);
   const [detailDevice, setDetailDevice]             = useState(null);
+  // ✅ Nouveau : toggle "capteurs réellement connectés maintenant" (10 dernières
+  // secondes, via /sensors-connected) vs historique complet (/sensors-discovery,
+  // comportement d'origine, inchangé par défaut).
+  const [liveOnly, setLiveOnly]                     = useState(false);
   const isMobile = useMediaQuery("(max-width:600px)");
 
-  const loadSensors = async (isManualRefresh = false) => {
+  const loadSensors = async (isManualRefresh = false, useLiveOnly = liveOnly) => {
     if (isManualRefresh) setRefreshing(true); else setLoading(true);
     try {
-      const res = await axios.get(`${API_BASE_URL}/sensors-discovery`);
+      const endpoint = useLiveOnly ? "/sensors-connected" : "/sensors-discovery";
+      const res = await axios.get(`${API_BASE_URL}${endpoint}`);
       setSensors(res.data?.sensors || []);
       if (isManualRefresh) {
         setMessageType("success");
@@ -963,7 +969,10 @@ const MappingManager = () => {
     }
   };
 
-  useEffect(() => { loadSensors(false); }, []);
+  useEffect(() => { loadSensors(false, liveOnly); }, [liveOnly]);
+
+  // ✅ Bascule le toggle ; le useEffect ci-dessus recharge automatiquement
+  const handleToggleLiveOnly = () => setLiveOnly(prev => !prev);
 
   // ✅ Le device tension ("Netz", anciennement "Sensor0") est affiché à part,
   // dans des boîtes Phase 1/2/3 comme sur l'onglet Echtzeit — pas comme une
@@ -1056,12 +1065,33 @@ const MappingManager = () => {
               </Box>
             </Popover>
 
-            <Button variant="outlined" onClick={() => loadSensors(true)} disabled={refreshing} startIcon={<UpdateIcon />}
+            {/* ✅ Nouveau bouton toggle : capteurs connectés maintenant vs historique complet */}
+            <Button
+              variant={liveOnly ? "contained" : "outlined"}
+              onClick={handleToggleLiveOnly}
+              startIcon={<DeviceHubIcon />}
+              sx={{
+                textTransform: "none",
+                borderRadius: 5,
+                bgcolor: liveOnly ? "#2c7a4d" : undefined,
+                "&:hover": { bgcolor: liveOnly ? "#1e5a3a" : undefined }
+              }}
+            >
+              {liveOnly ? "🟢 Nur aktuell verbundene Sensoren" : "🕘 Alle Sensoren (Verlauf)"}
+            </Button>
+
+            <Button variant="outlined" onClick={() => loadSensors(true, liveOnly)} disabled={refreshing} startIcon={<UpdateIcon />}
               style={{ borderRadius: 20, textTransform: "none" }}>
               {refreshing ? "Aktualisieren..." : "Aktualisieren"}
             </Button>
           </Box>
         </Box>
+        {/* ✅ Indicateur explicite du mode actif */}
+        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
+          {liveOnly
+            ? "Anzeige: nur Sensoren, die aktuell (letzte 10 Sek.) Daten senden."
+            : "Anzeige: alle Sensoren, die jemals Daten gesendet haben (Verlauf)."}
+        </Typography>
       </Paper>
 
       {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2 }}>{message}</Alert>}
@@ -1085,7 +1115,9 @@ const MappingManager = () => {
 
       {visibleSensors.length === 0 ? (
         <Paper elevation={1} sx={{ p: 3 }}>
-          <Typography color="text.secondary">Keine aktiven Sensoren in InfluxDB gefunden.</Typography>
+          <Typography color="text.secondary">
+            {liveOnly ? "Keine aktuell verbundenen Sensoren gefunden." : "Keine aktiven Sensoren in InfluxDB gefunden."}
+          </Typography>
         </Paper>
       ) : (
         <div style={{ display: "flex", gap: 15, flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>

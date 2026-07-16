@@ -74,9 +74,6 @@ function initConfig() {
 initConfig();
 
 // ========== KUNDENDATEN LABELS (Bezeichnung par Sensor/Kanal, distinct de la config CH) ==========
-// ✅ Nouveau : stockage de la "Bezeichnung" utilisée dans l'interface Kundendaten.
-// Indépendant de channelConfig (Kanal Konfiguration), qui gère label/schwellwert/hoechstwert
-// par canal physique CHx. Ici la clé est Sensor+Kanal (ex: "Sensor1_1"), vide par défaut.
 let kundenLabels = {};
 
 function getKundenLabelKey(device, kanal) {
@@ -192,9 +189,6 @@ async function getEnergiesFromMesskoffer() {
         const temporary = {};
         if (typeof raw === "string") {
             const values = raw.split(";").map(v => parseFloat(v));
-            // ✅ Index 0 = compteur d'inscription (ignoré).
-            // Index 1-18  = énergies cumulées (ignorées, non désirées).
-            // Index 19-36 = énergies temporaires des 18 derniers canaux (celles qu'on veut).
             for (let i = 0; i < 18; i++) {
                 temporary[`CH${i + 1}`] = (values[19 + i] || 0) / 10000;
             }
@@ -243,7 +237,6 @@ initConfigFromMesskoffer();
 let energyConfig = {};
 function initEnergyConfig() {
     for (const ch of channelsList) {
-        // ✅ Uniquement le compteur temporaire (18 dernières valeurs du CGI), pas de cumulé.
         energyConfig[ch] = { temporary: 0, updatedAt: 0 };
     }
 }
@@ -269,8 +262,6 @@ app.post("/mapping", (req, res) => {
 });
 
 // ========== ROUTES KUNDENDATEN (Bezeichnung par Sensor/Kanal) ==========
-// ✅ Nouveau : lecture/écriture de la Bezeichnung utilisée dans l'interface Kundendaten.
-// Aucun champ Max/Min ici, uniquement la Bezeichnung (contrairement à /config).
 
 app.get("/kundendaten-labels", (req, res) => {
     res.json(kundenLabels);
@@ -287,71 +278,76 @@ app.post("/kundendaten-labels", (req, res) => {
     res.json({ success: true, device, kanal: String(kanal), label: kundenLabels[key] });
 });
 
-// ========== ROUTE DECOUVERTE DYNAMIQUE SENSOR/KANAL (nouvel onglet Mapping) ==========
-// Interroge InfluxDB sans limite de temps fixe pour lister tous les Device/Kanal
-// réellement présents dans le bucket, avec leurs dernières valeurs Strom / Wirkleistung /
-// Spannung / Energie.
-// ✅ Spannung ajoutée : le device "Netz" (anciennement "Sensor0") porte la tension du
-// réseau sur les Kanal 1/2/3 (L1/L2/L3) ; il n'est plus exclu du résultat.
-// ✅ Bezeichnung ajoutée : label Kundendaten (vide par défaut) par Sensor/Kanal, pour
-// alimenter directement l'interface Kundendaten sans requête supplémentaire.
+// ========== DECOUVERTE DYNAMIQUE SENSOR/KANAL (FONCTION PARTAGEE) ==========
+// ✅ Factorisation : la logique de découverte (groupement Device -> Kanal ->
+// dernières valeurs) est commune entre "historique complet" (/sensors-discovery,
+// range depuis toujours) et "connecté maintenant" (/sensors-connected, range
+// récent). On la met dans une fonction paramétrée par la borne de temps Flux
+// (ex: "0" pour tout l'historique, "-2m" pour les 2 dernières minutes),
+// pour ne pas dupliquer le code et rester cohérent si la logique évolue.
+
+async function discoverSensors(rangeStart) {
+    const fluxQuery = `
+        from(bucket: "${INFLUX_BUCKET}")
+          |> range(start: ${rangeStart})
+          |> filter(fn: (r) => r["_measurement"] == "sensoren")
+          |> filter(fn: (r) => r["_field"] == "Strom" or r["_field"] == "Wirkleistung" or r["_field"] == "Energie" or r["_field"] == "Spannung")
+          |> last()
+    `;
+
+    const rows = await queryApi.collectRows(fluxQuery);
+
+    // Regrouper par Device -> Kanal -> { Strom, Wirkleistung, Spannung, Energie, time }
+    const bySensor = {};
+
+    rows.forEach(row => {
+        const device = row.Device;
+        const kanal  = String(row.Kanal);
+        const field  = row._field;
+
+        if (!device) return;
+
+        if (!bySensor[device]) bySensor[device] = {};
+        if (!bySensor[device][kanal]) {
+            bySensor[device][kanal] = { kanal, Strom: null, Wirkleistung: null, Spannung: null, Energie: null, updatedAt: null };
+        }
+
+        if      (field === "Strom")        bySensor[device][kanal].Strom        = row._value;
+        else if (field === "Wirkleistung")  bySensor[device][kanal].Wirkleistung = row._value;
+        else if (field === "Spannung")      bySensor[device][kanal].Spannung     = row._value;
+        else if (field === "Energie")       bySensor[device][kanal].Energie      = row._value;
+
+        const t = new Date(row._time).getTime();
+        if (!bySensor[device][kanal].updatedAt || t > bySensor[device][kanal].updatedAt) {
+            bySensor[device][kanal].updatedAt = t;
+        }
+    });
+
+    // Trier : "Netz"/"Sensor0" (tension) en premier, puis Sensor1, Sensor2, ...
+    const sensorNames = Object.keys(bySensor).sort((a, b) => {
+        const rank = (name) => {
+            if (name === "Netz" || name === "Sensor0") return -1;
+            const n = parseInt(name.replace("Sensor", ""), 10);
+            return isNaN(n) ? 999 : n;
+        };
+        return rank(a) - rank(b);
+    });
+
+    return sensorNames.map(device => {
+        const kanaux = Object.values(bySensor[device])
+            .sort((a, b) => parseInt(a.kanal, 10) - parseInt(b.kanal, 10))
+            .map(k => ({ ...k, Bezeichnung: getKundenLabel(device, k.kanal) }));
+        return { device, kanaele: kanaux };
+    });
+}
+
+// ========== ROUTE HISTORIQUE COMPLET (onglet Mapping) ==========
+// Tous les Device/Kanal ayant EU AU MOINS UNE FOIS des données (depuis toujours).
+// C'est la vue "historique" existante, inchangée.
 
 app.get("/sensors-discovery", async (req, res) => {
     try {
-        const fluxQuery = `
-            from(bucket: "${INFLUX_BUCKET}")
-              |> range(start: 0)
-              |> filter(fn: (r) => r["_measurement"] == "sensoren")
-              |> filter(fn: (r) => r["_field"] == "Strom" or r["_field"] == "Wirkleistung" or r["_field"] == "Energie" or r["_field"] == "Spannung")
-              |> last()
-        `;
-
-        const rows = await queryApi.collectRows(fluxQuery);
-
-        // Regrouper par Device -> Kanal -> { Strom, Wirkleistung, Spannung, Energie, time }
-        const bySensor = {};
-
-        rows.forEach(row => {
-            const device = row.Device;
-            const kanal  = String(row.Kanal);
-            const field  = row._field;
-
-            if (!device) return;
-
-            if (!bySensor[device]) bySensor[device] = {};
-            if (!bySensor[device][kanal]) {
-                bySensor[device][kanal] = { kanal, Strom: null, Wirkleistung: null, Spannung: null, Energie: null, updatedAt: null };
-            }
-
-            if      (field === "Strom")        bySensor[device][kanal].Strom        = row._value;
-            else if (field === "Wirkleistung")  bySensor[device][kanal].Wirkleistung = row._value;
-            else if (field === "Spannung")      bySensor[device][kanal].Spannung     = row._value;
-            else if (field === "Energie")       bySensor[device][kanal].Energie      = row._value;
-
-            const t = new Date(row._time).getTime();
-            if (!bySensor[device][kanal].updatedAt || t > bySensor[device][kanal].updatedAt) {
-                bySensor[device][kanal].updatedAt = t;
-            }
-        });
-
-        // Construire un résultat trié : "Netz"/"Sensor0" (tension) en premier, puis
-        // Sensor1, Sensor2, ... par numéro croissant.
-        const sensorNames = Object.keys(bySensor).sort((a, b) => {
-            const rank = (name) => {
-                if (name === "Netz" || name === "Sensor0") return -1;
-                const n = parseInt(name.replace("Sensor", ""), 10);
-                return isNaN(n) ? 999 : n;
-            };
-            return rank(a) - rank(b);
-        });
-
-        const result = sensorNames.map(device => {
-            const kanaux = Object.values(bySensor[device])
-                .sort((a, b) => parseInt(a.kanal, 10) - parseInt(b.kanal, 10))
-                .map(k => ({ ...k, Bezeichnung: getKundenLabel(device, k.kanal) }));
-            return { device, kanaele: kanaux };
-        });
-
+        const result = await discoverSensors("0");
         res.json({ sensors: result, count: result.length });
     } catch (err) {
         console.error("/sensors-discovery error:", err);
@@ -359,8 +355,68 @@ app.get("/sensors-discovery", async (req, res) => {
     }
 });
 
+// ========== ROUTE "CAPTEURS RÉELLEMENT CONNECTÉS" (via Node-RED) ==========
+// ✅ MODIFIÉ : l'ancienne heuristique basée sur une fenêtre de temps InfluxDB
+// (ex: "actif dans les 10 dernières secondes") ne fonctionne pas de façon fiable,
+// car le flux Node-RED Volt1000S interroge et écrit EN CONTINU tous les canaux
+// configurés (Sensor1, Sensor2, ...), qu'un capteur soit physiquement branché ou
+// non — un canal "configuré mais débranché" apparaît donc quand même comme actif.
+//
+// La vraie source de vérité est le registre Modbus Sensoranzahl du Volt1000S
+// lui-même, qui reflète le nombre RÉEL de capteurs physiquement branchés. Ce
+// registre est lu en continu par Node-RED (global.set('Sensoranzahl', ...)) et
+// désormais exposé via un endpoint HTTP : GET /sensoranzahl sur Node-RED.
+//
+// Ici, on interroge Node-RED en direct à chaque appel (pas de cache), on
+// récupère ce nombre réel N, puis on ne garde que Sensor1...SensorN (Netz/
+// Sensor0 — la tension réseau — est toujours conservé, ce n'est pas un capteur
+// de courant).
+
+const NODERED_URL = process.env.NODERED_URL || "http://192.168.1.20:1880";
+
+async function getRealConnectedSensorCount() {
+    const url = `${NODERED_URL}/sensoranzahl`;
+    const res = await axios.get(url, { timeout: 3000 });
+    const anzahl = parseInt(res.data?.anzahl, 10);
+    if (isNaN(anzahl) || anzahl < 0) {
+        throw new Error(`Réponse Node-RED invalide pour Sensoranzahl (reçu: ${JSON.stringify(res.data)})`);
+    }
+    return anzahl;
+}
+
+app.get("/sensors-connected", async (req, res) => {
+    try {
+        const anzahl = await getRealConnectedSensorCount();
+
+        // Historique complet (toutes les données InfluxDB jamais écrites), puis
+        // filtrage sur le nombre réel de capteurs branchés selon Node-RED.
+        // ✅ MODIFIÉ : "Netz"/"Sensor0" (tension réseau uniquement, pas un vrai
+        // capteur de courant) sont désormais exclus de cette vue.
+        const allSensors = await discoverSensors("0");
+        const result = allSensors.filter(s => {
+            if (s.device === "Netz" || s.device === "Sensor0") return false;
+            const num = parseInt(s.device.replace("Sensor", ""), 10);
+            return !isNaN(num) && num <= anzahl;
+        });
+
+        res.json({ sensors: result, count: result.length, sensoranzahl: anzahl });
+    } catch (err) {
+        // ✅ MODIFIÉ : err.message était vide dans certains cas (ex: erreur réseau
+        // sans message standard). On log l'erreur complète et on renvoie aussi le
+        // code d'erreur réseau (ECONNREFUSED, ENOTFOUND, ETIMEDOUT...) pour pouvoir
+        // diagnostiquer précisément (ex: Node-RED dans un autre conteneur Docker que
+        // le backend → "localhost" ne le joint pas).
+        console.error("/sensors-connected error:", err);
+        res.status(500).json({
+            error: "Node-RED nicht erreichbar oder Sensoranzahl ungültig",
+            details: err.message || String(err) || "Keine Fehlermeldung verfügbar",
+            code: err.code || null,
+            nodered_url: `${NODERED_URL}/sensoranzahl`
+        });
+    }
+});
+
 // ========== ROUTE HISTORIQUE DIRECT PAR SENSOR/KANAL (pour onglet Mapping) ==========
-// Interroge InfluxDB directement avec Device + Kanal, sans passer par channelMapping/CH.
 
 app.get("/sensor-history/:device/:kanal", async (req, res) => {
     const { device, kanal } = req.params;
@@ -404,9 +460,6 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
 });
 
 // ========== ROUTE DEBUG TEMPORAIRE (diagnostic mego) ==========
-// ⚠️ Route de diagnostic uniquement, à supprimer une fois le problème résolu.
-// Retourne les 20 dernières lignes brutes du champ "Strom" du measurement "mego",
-// sans AUCUN filtre Device/Kanal/Label, pour voir les vraies valeurs des tags en base.
 app.get("/debug-mego", async (req, res) => {
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
@@ -523,8 +576,6 @@ app.get("/energy-values", async (req, res) => {
         for (const ch of channelsList) {
             result[ch] = {
                 label:     channelConfig[ch]?.label || ch,
-                // ✅ Uniquement les 18 dernières valeurs (temporaires) du CGI Messkoffer,
-                // jamais les valeurs cumulées d'InfluxDB.
                 temporary: temporary[ch] ?? energyConfig[ch]?.temporary ?? 0,
                 updatedAt: Date.now()
             };
@@ -542,7 +593,6 @@ app.get("/energy-values", async (req, res) => {
     }
 });
 
-// ✅ CORRECTION : délai 2s avant relecture Messkoffer
 app.post("/energy-values/set", async (req, res) => {
     const updates = req.body;
     if (typeof updates !== "object") return res.status(400).json({ error: "JSON-Objekt erwartet" });
@@ -556,10 +606,8 @@ app.post("/energy-values/set", async (req, res) => {
 
             const chNum = parseInt(ch.substring(2), 10);
 
-            // 1. Envoyer au Messkoffer
             await setEnergyToMesskoffer(chNum, newTemp);
 
-            // 2. Ecrire dans InfluxDB via mapping
             const map = channelMapping[ch];
             if (map) {
                 const point = new Point("sensoren")
@@ -570,12 +618,10 @@ app.post("/energy-values/set", async (req, res) => {
                 writeApi.writePoint(point);
             }
 
-            // ✅ Mettre à jour le cache local immédiatement
             energyConfig[ch] = { ...energyConfig[ch], temporary: newTemp, updatedAt: Date.now() };
         }
         await writeApi.flush();
 
-        // ✅ Attendre 2s que le Messkoffer traite avant de relire
         await new Promise(resolve => setTimeout(resolve, 2000));
 
         const { temporary } = await getEnergiesFromMesskoffer();
@@ -583,13 +629,11 @@ app.post("/energy-values/set", async (req, res) => {
         for (const ch of channelsList) {
             result[ch] = {
                 label:     channelConfig[ch]?.label || ch,
-                // ✅ Si Messkoffer retourne encore 0, on garde la valeur du cache local
                 temporary: (temporary[ch] && temporary[ch] > 0)
                     ? temporary[ch]
                     : energyConfig[ch]?.temporary ?? 0,
                 updatedAt: Date.now()
             };
-            // ✅ Mettre à jour le cache avec la valeur confirmée
             energyConfig[ch] = {
                 temporary: result[ch].temporary,
                 updatedAt: result[ch].updatedAt
@@ -603,7 +647,6 @@ app.post("/energy-values/set", async (req, res) => {
 });
 
 // ========== CALCUL SCHEINLEISTUNG / BLINDLEISTUNG via P et cosφ ==========
-// S = P / cosφ ; Q = √(S² - P²). Évite la division par zéro / cosφ trop faible.
 function computeApparentAndReactive(P, cosPhi) {
     if (P === null || P === undefined || isNaN(P)) return { S: null, Q: null };
     if (cosPhi === null || cosPhi === undefined || isNaN(cosPhi) || Math.abs(cosPhi) < 0.01) {
@@ -615,18 +658,11 @@ function computeApparentAndReactive(P, cosPhi) {
 }
 
 // ========== ROUTE DATA (Echtzeit) ==========
-// ✅ Source désormais : measurement "mego", Device "mE180" (données Node-RED),
-// filtrées par Kanal=CHx ET Label=<label CGI actuel du canal>.
-// Spannung reste via /voltages (CGI Messkoffer). Energie reste via cache/CGI (jamais mego).
 
 const MEGO_MEASUREMENT = "mego";
 const MEGO_DEVICE      = "mE180";
 
 // ========== HISTORIQUE ENERGIE (écriture périodique dans InfluxDB) ==========
-// ✅ Ajouté sur demande : l'Energie (Messkoffer) n'avait pas d'historique car
-// jamais écrite dans InfluxDB. On l'écrit ici régulièrement dans le measurement
-// "mego" (mêmes tags Device/Kanal/Label que les autres champs) afin que
-// /history puisse la relire et l'afficher dans l'onglet Trends.
 const ENERGY_HISTORY_INTERVAL_MS = 30000;
 
 async function writeEnergyHistoryPoints() {
@@ -652,10 +688,8 @@ setInterval(writeEnergyHistoryPoints, ENERGY_HISTORY_INTERVAL_MS);
 
 app.get("/data", async (req, res) => {
     try {
-        // ✅ énergies depuis Messkoffer (inchangé)
         const { temporary: messeEnergy } = await getEnergiesFromMesskoffer();
 
-        // ✅ tensions depuis Messkoffer CGI (inchangé, indépendant de mego)
         let voltagesU = { 1: 0, 2: 0, 3: 0 };
         try {
             const url      = `http://${MESSE_IP}/get_live_values.cgi?id=${MESSE_ID}&ch=18`;
@@ -672,8 +706,6 @@ app.get("/data", async (req, res) => {
             console.error("[/data] Fehler Spannungen:", err.message);
         }
 
-        // ✅ Une requête Flux par canal, car le filtre Label dépend du label CGI courant
-        // de chaque canal (peut différer d'un canal à l'autre).
         const queries = channelsList.map(ch => {
             const label = channelConfig[ch]?.label || ch;
             const safeLabel = label.replace(/"/g, '\\"');
@@ -723,7 +755,6 @@ app.get("/data", async (req, res) => {
                 Wirkleistung: P,
                 Spannung:     U,
                 CosinusPhi:   cosPhi,
-                // ✅ Energie : Messkoffer en priorité, cache local ensuite — jamais depuis mego
                 Energie_temp: (messeEnergy[ch] && messeEnergy[ch] > 0)
                     ? messeEnergy[ch]
                     : (energyConfig[ch]?.temporary && energyConfig[ch].temporary > 0)
@@ -731,7 +762,6 @@ app.get("/data", async (req, res) => {
                     : null
             };
 
-            // ✅ Scheinleistung / Blindleistung calculées via Wirkleistung et CosinusPhi
             const { S, Q } = computeApparentAndReactive(P, cosPhi);
             result[ch].Scheinleistung = S;
             result[ch].Blindleistung  = Q;
@@ -745,10 +775,6 @@ app.get("/data", async (req, res) => {
 });
 
 // ========== ROUTE HISTORY ==========
-// ✅ Source désormais : measurement "mego", Device "mE180", filtré par Kanal=CHx
-// et Label=<label CGI actuel du canal>.
-// ✅ Energie (Energie_temp) incluse : écrite périodiquement dans mego par
-// writeEnergyHistoryPoints() ci-dessus, donc désormais disponible dans Trends.
 
 app.get("/history/:channel", async (req, res) => {
     const { channel } = req.params;
@@ -826,4 +852,5 @@ app.listen(4000, "0.0.0.0", () => {
     console.log(`   InfluxDB : ${INFLUX_URL} | Bucket: ${INFLUX_BUCKET}`);
     console.log(`   Messkoffer: ${MESSE_IP} | ID: ${MESSE_ID}`);
     console.log(`   Kanäle: 18 | Mapping: CH1-CH18 → SensorN/Kanal`);
+    console.log(`   Sensoren "connectés maintenant" : via Node-RED (${NODERED_URL}/sensoranzahl)`);
 });
