@@ -407,11 +407,23 @@ const ChannelConfigManager = () => {
 };
 
 // ─── SENSOR-BEZEICHNUNG (Kundendaten) ────────────────────────────────────────
-// ✅ Nouvelle vue : même mise en page/style que ChannelConfigManager ci-dessus
-// (Paper, tableau, groupes colorés, bouton "Alle speichern"), mais appliquée
+// ✅ Vue avec la même mise en page/style que ChannelConfigManager ci-dessus
+// (Paper, tableau, groupes colorés, bouton "Alle speichern"), appliquée
 // aux Sensoren découverts dynamiquement (via /sensors-discovery), 4 Kanal
-// (1-4) par Sensor, avec UNIQUEMENT la Bezeichnung — pas de Schwellwert/
-// Höchstwert. Enregistrement via /kundendaten-labels (backend port 4000).
+// (1-4) par Sensor : Bezeichnung éditable + LIVE DATEN (Strom / Wirkleistung
+// / Energie uniquement, rafraîchies automatiquement toutes les 3s).
+// Enregistrement via /kundendaten-labels (backend port 4000).
+// ✅ Mêmes 6 mesures que la vue "Live Daten" (METRIC_OPTIONS), avec les mêmes
+// icônes — Kundendaten n'affiche plus seulement 3 valeurs mais l'ensemble.
+const KUNDEN_LIVE_METRICS = [
+  { value: "Strom",         label: "Strom (A)",          icon: ElectricBoltIcon,        decimals: 3, unit: "A"   },
+  { value: "CosinusPhi",    label: "Cosinus Phi",         icon: FunctionsIcon,           decimals: 4, unit: ""    },
+  { value: "Wirkleistung",  label: "Wirkleistung (W)",    icon: SpeedIcon,               decimals: 2, unit: "W"   },
+  { value: "Blindleistung", label: "Blindleistung (var)", icon: FlashOnIcon,             decimals: 2, unit: "var" },
+  { value: "Scheinleistung",label: "Scheinleistung (VA)", icon: TimelineIcon,            decimals: 2, unit: "VA"  },
+  { value: "Energie",       label: "Energie (kWh)",       icon: BatteryChargingFullIcon, decimals: 2, unit: "kWh" },
+];
+
 const SensorConfigManager = () => {
   const [sensors, setSensors]         = useState([]);
   const [labels, setLabels]           = useState({});
@@ -421,7 +433,10 @@ const SensorConfigManager = () => {
   const [messageType, setMessageType] = useState("success");
   const isMobile = useMediaQuery("(max-width:600px)");
 
-  const loadSensors = async () => {
+  // ✅ silent=true : rafraîchissement en arrière-plan (live), sans spinner ni
+  // écraser les champs Bezeichnung en cours d'édition par l'utilisateur.
+  const loadSensors = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const controller = new AbortController();
       const timeoutId  = setTimeout(() => controller.abort(), 5000);
@@ -440,15 +455,22 @@ const SensorConfigManager = () => {
         return next;
       });
     } catch (err) {
-      setMessageType("error");
-      setMessage(err.name === "AbortError"
-        ? "❌ Zeitüberschreitung: Server antwortet nicht."
-        : "❌ Fehler beim Laden der Sensoren: " + (err.message || "Netzwerkproblem"));
-      setTimeout(() => setMessage(""), 5000);
-    } finally { setLoading(false); }
+      if (!silent) {
+        setMessageType("error");
+        setMessage(err.name === "AbortError"
+          ? "❌ Zeitüberschreitung: Server antwortet nicht."
+          : "❌ Fehler beim Laden der Sensoren: " + (err.message || "Netzwerkproblem"));
+        setTimeout(() => setMessage(""), 5000);
+      }
+    } finally { if (!silent) setLoading(false); }
   };
 
-  useEffect(() => { loadSensors(); }, []);
+  useEffect(() => {
+    loadSensors(false);
+    // ✅ Live Daten : rafraîchissement automatique toutes les 3 secondes
+    const iv = setInterval(() => loadSensors(true), 3000);
+    return () => clearInterval(iv);
+  }, []);
 
   const handleChange = (device, kanal, value) =>
     setLabels(prev => ({ ...prev, [`${device}_${kanal}`]: value }));
@@ -471,7 +493,7 @@ const SensorConfigManager = () => {
       setMessageType("success");
       setMessage("✅ Bezeichnungen erfolgreich gespeichert");
       setTimeout(() => setMessage(""), 3000);
-      await loadSensors();
+      await loadSensors(false);
     } catch {
       setMessageType("error");
       setMessage("❌ Fehler beim Speichern der Bezeichnungen");
@@ -482,64 +504,118 @@ const SensorConfigManager = () => {
   if (loading) return <Typography>Sensoren werden geladen...</Typography>;
 
   // ✅ "Netz"/"Sensor0" exclu : ce device ne porte que la tension (Spannung),
-  // pas de Bezeichnung client à gérer ici.
+  // pas de Bezeichnung client ni de Live Daten à gérer ici.
   const realSensors = sensors.filter(s => s.device !== "Netz" && s.device !== "Sensor0");
 
-  const groups = realSensors.map((s, idx) => ({
+  const groups = realSensors.map(s => ({
     device:  s.device,
-    bgColor: ["#f4f7f9", "#eef2f5", "#f8f9fa"][idx % 3],
-    kanaele: ["1", "2", "3", "4"].map(kanal => ({
-      kanal,
-      exists: s.kanaele.some(k => k.kanal === kanal)
-    }))
+    kanaele: ["1", "2", "3", "4"].map(kanal => {
+      const k = s.kanaele.find(k => k.kanal === kanal);
+      return {
+        kanal,
+        exists:         Boolean(k),
+        Strom:          k?.Strom ?? null,
+        Wirkleistung:   k?.Wirkleistung ?? null,
+        Energie:        k?.Energie ?? null,
+        CosinusPhi:     k?.CosinusPhi ?? null,
+        Blindleistung:  k?.Blindleistung ?? null,
+        Scheinleistung: k?.Scheinleistung ?? null,
+      };
+    })
   }));
+
+  // ✅ Répartition en 3 colonnes, comme la vue "Live Daten" (Phase 1/2/3).
+  const chunkSize = Math.ceil(groups.length / 3) || 1;
+  const col1 = groups.slice(0, chunkSize);
+  const col2 = groups.slice(chunkSize, chunkSize * 2);
+  const col3 = groups.slice(chunkSize * 2);
+
+  // ── Carte d'un Kanal, même mise en page qu'un ChannelCard de "Live Daten" ──
+  const KanalCard = ({ device, kanal, exists, ...liveValues }) => {
+    const key = `${device}_${kanal}`;
+    return (
+      <Paper elevation={1} style={{ padding: 10, backgroundColor: "#fff", borderRadius: 8, marginBottom: 10 }}>
+        <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1 }}>
+          <Box sx={{ width: 10, height: 10, borderRadius: "50%", backgroundColor: KANAL_COLORS[kanal] || "#999", flexShrink: 0 }} />
+          <Typography variant="subtitle2" style={{ fontWeight: 600, color: PRIMARY_COLOR, fontSize: "0.85rem" }}>Kanal {kanal}</Typography>
+          <Box flex={1} />
+          <TextField size="small" value={labels[key] || ""}
+            onChange={e => handleChange(device, kanal, e.target.value)}
+            variant="outlined" disabled={!exists}
+            placeholder={exists ? "Bezeichnung" : "Kein Signal"}
+            sx={{ width: 150 }}
+            InputProps={{ style: { color: "#000", fontSize: "0.85rem", fontWeight: 600, backgroundColor: "#f5f5f5", padding: 0 } }}
+            inputProps={{ style: { padding: "6px 8px" } }} />
+        </Box>
+        <Divider style={{ marginBottom: 8, backgroundColor: "#e0e0e0" }} />
+        {KUNDEN_LIVE_METRICS.map(m => {
+          const Icon = m.icon;
+          return (
+            <Box key={m.value} display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: "6px" }}>
+              <Box display="flex" alignItems="center" gap={0.8}>
+                <Icon style={{ color: "#888", fontSize: "0.85rem" }} />
+                <Typography variant="caption" style={{ color: "#666" }}>
+                  {m.value === "CosinusPhi" ? "Cosinus Phi:" : m.label.split(" ")[0] + ":"}
+                </Typography>
+              </Box>
+              <Box sx={{ bgcolor: "#e0e0e0", px: "8px", py: "2px", borderRadius: "4px", minWidth: 100, textAlign: "center" }}>
+                <Typography variant="caption" style={{ fontWeight: 500, color: exists ? "#222" : "#aaa" }}>
+                  {exists ? formatValue(liveValues[m.value], m.decimals, m.unit) : "—"}
+                </Typography>
+              </Box>
+            </Box>
+          );
+        })}
+      </Paper>
+    );
+  };
+
+  // ── Colonne d'un groupe de Sensoren (style GroupSection de "Live Daten") ──
+  const SensorColumn = ({ deviceGroups, title }) => {
+    if (deviceGroups.length === 0) return null;
+    return (
+      <Paper elevation={2} style={{ flex: 1, padding: 12, background: "#fff", borderRadius: 10 }}>
+        <Box display="flex" alignItems="center" justifyContent="center" gap={1} sx={{ mb: "12px" }}>
+          <DeviceHubIcon style={{ color: PRIMARY_COLOR, fontSize: "1.1rem" }} />
+          <Typography variant="subtitle2" style={{ fontWeight: 600, color: PRIMARY_COLOR, letterSpacing: "0.5px" }}>{title}</Typography>
+        </Box>
+        {deviceGroups.map(group => (
+          <Box key={group.device} sx={{ mb: 2 }}>
+            <Typography variant="caption" style={{ color: "#888", fontWeight: 600, display: "block", mb: "6px" }}>
+              {group.device}
+            </Typography>
+            {group.kanaele.map(k => (
+              <KanalCard key={k.kanal} device={group.device} {...k} />
+            ))}
+          </Box>
+        ))}
+      </Paper>
+    );
+  };
 
   return (
     <Paper elevation={2} sx={{ p: 3, mt: 3 }}>
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={2} flexWrap="wrap" gap={1}>
         <Typography variant="h5">Sensor-Bezeichnung</Typography>
-        <Button variant="contained" onClick={saveAll} disabled={saving} startIcon={<SaveIcon />}>
-          {saving ? "Speichern..." : "Alle speichern"}
-        </Button>
+        <Box display="flex" alignItems="center" gap={1.5}>
+          <Typography variant="caption" style={{ color: "#666" }}>
+            🔄 Live Daten – Aktualisierung alle 3 Sekunden
+          </Typography>
+          <Button variant="contained" onClick={saveAll} disabled={saving} startIcon={<SaveIcon />}>
+            {saving ? "Speichern..." : "Alle speichern"}
+          </Button>
+        </Box>
       </Box>
       {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2 }}>{message}</Alert>}
       {groups.length === 0 ? (
         <Typography color="text.secondary">Keine aktiven Sensoren gefunden.</Typography>
-      ) : groups.map((group) => (
-        <Box key={group.device} sx={{ mb: 3, p: 2, borderRadius: 2, backgroundColor: group.bgColor, overflowX: "auto" }}>
-          <Typography variant="subtitle1" fontWeight="bold" sx={{ mb: 1 }}>{group.device}</Typography>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 400 : "auto" }}>
-            <thead>
-              <tr style={{ backgroundColor: "rgba(0,0,0,0.05)" }}>
-                <th style={{ padding: "12px", textAlign: "left" }}>Kanal</th>
-                <th style={{ padding: "12px", textAlign: "left" }}>Bezeichnung</th>
-              </tr>
-            </thead>
-            <tbody>
-              {group.kanaele.map(({ kanal, exists }) => {
-                const key = `${group.device}_${kanal}`;
-                return (
-                  <tr key={key} style={{ borderBottom: "1px solid #e0e0e0", borderLeft: `4px solid ${KANAL_COLORS[kanal] || "#999"}` }}>
-                    <td style={{ padding: "8px", fontWeight: "bold" }}>
-                      <Box display="flex" alignItems="center" gap={1}>
-                        <Box sx={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: KANAL_COLORS[kanal] || "#999", flexShrink: 0 }} />
-                        Kanal {kanal}
-                      </Box>
-                    </td>
-                    <td style={{ padding: "8px" }}>
-                      <TextField size="small" value={labels[key] || ""}
-                        onChange={e => handleChange(group.device, kanal, e.target.value)}
-                        fullWidth variant="outlined" disabled={!exists}
-                        placeholder={exists ? "Bezeichnung" : "Kein Signal"}
-                        InputProps={{ style: { color: "#000", fontSize: "1rem", fontWeight: 600, backgroundColor: "#f5f5f5" } }} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </Box>
-      ))}
+      ) : (
+        <div style={{ display: "flex", gap: 15, flexDirection: isMobile ? "column" : "row" }}>
+          <SensorColumn deviceGroups={col1} title="Gruppe 1" />
+          <SensorColumn deviceGroups={col2} title="Gruppe 2" />
+          <SensorColumn deviceGroups={col3} title="Gruppe 3" />
+        </div>
+      )}
     </Paper>
   );
 };
@@ -772,14 +848,34 @@ const EnergyManager = () => {
   );
 };
 
-// ─── MAPPING METRIC OPTIONS (Strom / Wirkleistung / Spannung / Energie) ────────────────
+// ─── MAPPING METRIC OPTIONS (Strom / Wirkleistung / Spannung / Energie / Cosinus Phi / Blindleistung / Scheinleistung) ────────────────
+// ✅ Étendu aux 6 mesures de "Live Daten" (comme Kundendaten) — utilisé pour les
+// cartes Sensor et le résumé du détail. CosinusPhi/Blindleistung/Scheinleistung
+// sont déjà calculées côté backend dans /sensors-discovery et /sensors-connected.
 const MAPPING_METRIC_OPTIONS = [
-  { value: "Strom",        label: "Strom (A)",        icon: ElectricBoltIcon,        decimals: 3, unit: "A"   },
-  { value: "Wirkleistung", label: "Wirkleistung (W)", icon: SpeedIcon,               decimals: 2, unit: "W"   },
-  { value: "Spannung",     label: "Spannung (V)",     icon: VoltageSvgIcon,          decimals: 1, unit: "V"   },
-  { value: "Energie",      label: "Energie (kWh)",    icon: BatteryChargingFullIcon, decimals: 2, unit: "kWh" },
+  { value: "Strom",         label: "Strom (A)",          icon: ElectricBoltIcon,        decimals: 3, unit: "A"   },
+  { value: "CosinusPhi",    label: "Cosinus Phi",         icon: FunctionsIcon,           decimals: 4, unit: ""    },
+  { value: "Wirkleistung",  label: "Wirkleistung (W)",    icon: SpeedIcon,               decimals: 2, unit: "W"   },
+  { value: "Blindleistung", label: "Blindleistung (var)", icon: FlashOnIcon,             decimals: 2, unit: "var" },
+  { value: "Scheinleistung",label: "Scheinleistung (VA)", icon: TimelineIcon,            decimals: 2, unit: "VA"  },
+  { value: "Spannung",      label: "Spannung (V)",        icon: VoltageSvgIcon,          decimals: 1, unit: "V"   },
+  { value: "Energie",       label: "Energie (kWh)",       icon: BatteryChargingFullIcon, decimals: 2, unit: "kWh" },
 ];
 const MAPPING_METRIC_LABELS = {
+  Strom:          "Strom (A)",
+  CosinusPhi:     "Cosinus Phi",
+  Wirkleistung:   "Wirkleistung (W)",
+  Blindleistung:  "Blindleistung (var)",
+  Scheinleistung: "Scheinleistung (VA)",
+  Spannung:       "Spannung (V)",
+  Energie:        "Energie (kWh)",
+};
+// ✅ Le graphique d'historique (/sensor-history) ne supporte que les mesures
+// stockées directement en InfluxDB — CosinusPhi/Blindleistung/Scheinleistung
+// sont calculées à la volée et n'ont pas d'historique propre. On restreint donc
+// le sélecteur de courbe à ces 4-là, tandis que le résumé/les cartes utilisent
+// bien les 7 valeurs ci-dessus.
+const MAPPING_HISTORY_METRIC_LABELS = {
   Strom:        "Strom (A)",
   Wirkleistung: "Wirkleistung (W)",
   Spannung:     "Spannung (V)",
@@ -858,7 +954,7 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
         <Menu anchorEl={metricAnchorEl} open={Boolean(metricAnchorEl)} onClose={() => setMetricAnchorEl(null)}
           anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }}
           disableAutoFocus disableEnforceFocus disableScrollLock>
-          {Object.entries(MAPPING_METRIC_LABELS).map(([key, label]) => (
+          {Object.entries(MAPPING_HISTORY_METRIC_LABELS).map(([key, label]) => (
             <MenuItem key={key} onClick={e => { e.stopPropagation(); setSelectedMetric(key); }}
               selected={selectedMetric === key} sx={{ borderRadius: 1 }}>
               <Checkbox checked={selectedMetric === key} size="small" />

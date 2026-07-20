@@ -278,6 +278,19 @@ app.post("/kundendaten-labels", (req, res) => {
     res.json({ success: true, device, kanal: String(kanal), label: kundenLabels[key] });
 });
 
+// ========== CALCUL SCHEINLEISTUNG / BLINDLEISTUNG via P et cosφ ==========
+// ✅ Déplacé plus haut (avant discoverSensors) pour être utilisé aussi dans
+// la découverte Kundendaten/Mapping, en plus de la route /data.
+function computeApparentAndReactive(P, cosPhi) {
+    if (P === null || P === undefined || isNaN(P)) return { S: null, Q: null };
+    if (cosPhi === null || cosPhi === undefined || isNaN(cosPhi) || Math.abs(cosPhi) < 0.01) {
+        return { S: null, Q: null };
+    }
+    const S = P / cosPhi;
+    const Q = Math.sqrt(Math.max(0, S * S - P * P));
+    return { S, Q };
+}
+
 // ========== DECOUVERTE DYNAMIQUE SENSOR/KANAL (FONCTION PARTAGEE) ==========
 // ✅ Factorisation : la logique de découverte (groupement Device -> Kanal ->
 // dernières valeurs) est commune entre "historique complet" (/sensors-discovery,
@@ -285,20 +298,37 @@ app.post("/kundendaten-labels", (req, res) => {
 // récent). On la met dans une fonction paramétrée par la borne de temps Flux
 // (ex: "0" pour tout l'historique, "-2m" pour les 2 dernières minutes),
 // pour ne pas dupliquer le code et rester cohérent si la logique évolue.
+//
+// ✅ CORRIGÉ (d'après le flux Node-RED "Volt1000S") : une seule measurement,
+// "sensoren", contient Strom / Wirkleistung / Spannung / Energie / CosPhi.
+// Le champ Cosinus Phi s'appelle "CosPhi" (pas "Leistungsfaktor") et est
+// écrit À PART, sous Device="Sensor0" avec Kanal = numéro de CANAL GLOBAL
+// (1-18, = CH1-CH18), pas le Kanal réel (1-4) du Sensor physique. On corrèle
+// donc ce CosPhi vers le bon Device/Kanal via channelMapping (CH -> {device, kanal}).
+
+function findChannelForDeviceKanal(device, kanal) {
+    for (const [ch, map] of Object.entries(channelMapping)) {
+        if (map.device === device && map.kanal === String(kanal)) return ch;
+    }
+    return null;
+}
 
 async function discoverSensors(rangeStart) {
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
           |> range(start: ${rangeStart})
           |> filter(fn: (r) => r["_measurement"] == "sensoren")
-          |> filter(fn: (r) => r["_field"] == "Strom" or r["_field"] == "Wirkleistung" or r["_field"] == "Energie" or r["_field"] == "Spannung")
+          |> filter(fn: (r) => r["_field"] == "Strom" or r["_field"] == "Wirkleistung" or r["_field"] == "Spannung" or r["_field"] == "Energie" or r["_field"] == "CosPhi")
           |> last()
     `;
 
     const rows = await queryApi.collectRows(fluxQuery);
 
-    // Regrouper par Device -> Kanal -> { Strom, Wirkleistung, Spannung, Energie, time }
+    // Regrouper par Device -> Kanal -> { Strom, Wirkleistung, Spannung, Energie, CosinusPhi, time }
     const bySensor = {};
+    // ✅ CosPhi brut, indexé par numéro de canal GLOBAL (1-18, tel qu'écrit par
+    // Node-RED sous Device="Sensor0"), à corréler ensuite via channelMapping.
+    const cosPhiByGlobalChannel = {};
 
     rows.forEach(row => {
         const device = row.Device;
@@ -307,9 +337,16 @@ async function discoverSensors(rangeStart) {
 
         if (!device) return;
 
+        // ✅ CosPhi (Device="Sensor0", Kanal=canal global 1-18) : stocké à part,
+        // ne crée PAS d'entrée bySensor["Sensor0"] pour ce champ.
+        if (device === "Sensor0" && field === "CosPhi") {
+            cosPhiByGlobalChannel[kanal] = row._value;
+            return;
+        }
+
         if (!bySensor[device]) bySensor[device] = {};
         if (!bySensor[device][kanal]) {
-            bySensor[device][kanal] = { kanal, Strom: null, Wirkleistung: null, Spannung: null, Energie: null, updatedAt: null };
+            bySensor[device][kanal] = { kanal, Strom: null, Wirkleistung: null, Spannung: null, Energie: null, CosinusPhi: null, updatedAt: null };
         }
 
         if      (field === "Strom")        bySensor[device][kanal].Strom        = row._value;
@@ -322,6 +359,19 @@ async function discoverSensors(rangeStart) {
             bySensor[device][kanal].updatedAt = t;
         }
     });
+
+    // ✅ Corrélation CosPhi : pour chaque Device/Kanal réel découvert, on retrouve
+    // le CH correspondant (via channelMapping) puis le CosPhi de ce canal global.
+    for (const device of Object.keys(bySensor)) {
+        for (const kanal of Object.keys(bySensor[device])) {
+            const ch = findChannelForDeviceKanal(device, kanal);
+            if (!ch) continue;
+            const chNum = String(parseInt(ch.substring(2), 10));
+            if (cosPhiByGlobalChannel[chNum] !== undefined) {
+                bySensor[device][kanal].CosinusPhi = cosPhiByGlobalChannel[chNum];
+            }
+        }
+    }
 
     // Trier : "Netz"/"Sensor0" (tension) en premier, puis Sensor1, Sensor2, ...
     const sensorNames = Object.keys(bySensor).sort((a, b) => {
@@ -336,7 +386,17 @@ async function discoverSensors(rangeStart) {
     return sensorNames.map(device => {
         const kanaux = Object.values(bySensor[device])
             .sort((a, b) => parseInt(a.kanal, 10) - parseInt(b.kanal, 10))
-            .map(k => ({ ...k, Bezeichnung: getKundenLabel(device, k.kanal) }));
+            .map(k => {
+                // ✅ Blindleistung (var) et Scheinleistung (VA) calculées à partir de
+                // Wirkleistung (P) et Cosinus Phi, comme pour Live Daten.
+                const { S, Q } = computeApparentAndReactive(k.Wirkleistung, k.CosinusPhi);
+                return {
+                    ...k,
+                    Bezeichnung:    getKundenLabel(device, k.kanal),
+                    Scheinleistung: S,
+                    Blindleistung:  Q
+                };
+            });
         return { device, kanaele: kanaux };
     });
 }
@@ -435,23 +495,16 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
           |> filter(fn: (r) => r._measurement == "sensoren")
           |> filter(fn: (r) => r.Device == "${device}")
           |> filter(fn: (r) => r.Kanal  == "${kanal}")
-          |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Spannung" or r._field == "Energie")
+          |> filter(fn: (r) => r._field == "${metric}")
           |> aggregateWindow(every: 10s, fn: mean, createEmpty: false)
           |> sort(columns: ["_time"])
     `;
 
     try {
-        const rows         = await queryApi.collectRows(fluxQuery);
-        const pointsByTime = {};
-        rows.forEach(row => {
-            const t = row._time;
-            if (!pointsByTime[t]) pointsByTime[t] = { time: t };
-            if      (row._field === "Strom")        pointsByTime[t].Strom        = row._value;
-            else if (row._field === "Wirkleistung") pointsByTime[t].Wirkleistung = row._value;
-            else if (row._field === "Spannung")     pointsByTime[t].Spannung     = row._value;
-            else if (row._field === "Energie")      pointsByTime[t].Energie      = row._value;
-        });
-        const data = Object.values(pointsByTime).sort((a, b) => new Date(a.time) - new Date(b.time));
+        const rows = await queryApi.collectRows(fluxQuery);
+        const data = rows
+            .map(row => ({ time: row._time, [metric]: row._value }))
+            .sort((a, b) => new Date(a.time) - new Date(b.time));
         res.json({ device, kanal, metric, data });
     } catch (error) {
         console.error(`/sensor-history ${device}/${kanal} error:`, error);
@@ -645,17 +698,6 @@ app.post("/energy-values/set", async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
-
-// ========== CALCUL SCHEINLEISTUNG / BLINDLEISTUNG via P et cosφ ==========
-function computeApparentAndReactive(P, cosPhi) {
-    if (P === null || P === undefined || isNaN(P)) return { S: null, Q: null };
-    if (cosPhi === null || cosPhi === undefined || isNaN(cosPhi) || Math.abs(cosPhi) < 0.01) {
-        return { S: null, Q: null };
-    }
-    const S = P / cosPhi;
-    const Q = Math.sqrt(Math.max(0, S * S - P * P));
-    return { S, Q };
-}
 
 // ========== ROUTE DATA (Echtzeit) ==========
 
