@@ -1038,6 +1038,7 @@ const MappingManager = () => {
   const [selectedKanaele, setSelectedKanaele]       = useState([]);
   const [kanalAnchorEl, setKanalAnchorEl]           = useState(null);
   const [detailDevice, setDetailDevice]             = useState(null);
+  const [detailKanal, setDetailKanal]               = useState(null);
   // ✅ Nouveau : toggle "capteurs réellement connectés maintenant" (10 dernières
   // secondes, via /sensors-connected) vs historique complet (/sensors-discovery,
   // comportement d'origine, inchangé par défaut).
@@ -1111,8 +1112,8 @@ const MappingManager = () => {
         <MappingDetail
           device={sensorObj.device}
           kanaele={sensorObj.kanaele}
-          initialKanal={sensorObj.kanaele[0]?.kanal}
-          onBack={() => setDetailDevice(null)}
+          initialKanal={detailKanal || sensorObj.kanaele[0]?.kanal}
+          onBack={() => { setDetailDevice(null); setDetailKanal(null); }}
         />
       );
     }
@@ -1216,44 +1217,45 @@ const MappingManager = () => {
           </Typography>
         </Paper>
       ) : (
-        <div style={{ display: "flex", gap: 15, flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>
-          {visibleSensors.map(({ device, kanaele }) => {
-            const cardMetrics = MAPPING_METRIC_OPTIONS.filter(m => m.value !== "Spannung");
-            const visibleKanaele = kanaele.filter(k => shouldShowKanal(k.kanal));
-            const visibleMetricsExist = cardMetrics.some(m => shouldShowMetric(m.value));
-            if (!visibleMetricsExist || visibleKanaele.length === 0) return null;
-            return (
-              <Paper key={device} elevation={1} onClick={() => setDetailDevice(device)}
-                style={{ padding: 10, backgroundColor: "#fff", borderRadius: 8, cursor: "pointer",
-                  minWidth: isMobile ? "100%" : 260, flex: isMobile ? "1 1 100%" : "1 1 280px",
-                  transition: "transform 0.15s, box-shadow 0.15s" }}
-                onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.01)"; e.currentTarget.style.boxShadow = "0 6px 12px rgba(0,0,0,0.1)"; }}
-                onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)";    e.currentTarget.style.boxShadow = ""; }}>
-                <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1 }}>
-                  <DeviceHubIcon style={{ color: PRIMARY_COLOR, fontSize: "0.9rem" }} />
-                  <Typography variant="subtitle2" style={{ fontWeight: 600, color: PRIMARY_COLOR, fontSize: "0.85rem" }}>{device}</Typography>
-                  <Typography variant="caption" style={{ color: "#888", flex: 1, textAlign: "right" }}>{visibleKanaele.length} Kanäle</Typography>
-                </Box>
-                <Divider style={{ marginBottom: 8, backgroundColor: "#e0e0e0" }} />
+        visibleSensors.map(({ device, kanaele }) => {
+          const cardMetrics = MAPPING_METRIC_OPTIONS.filter(m => m.value !== "Spannung");
+          const visibleKanaele = kanaele.filter(k => shouldShowKanal(k.kanal));
+          const visibleMetricsExist = cardMetrics.some(m => shouldShowMetric(m.value));
+          if (!visibleMetricsExist || visibleKanaele.length === 0) return null;
+          return (
+            // ✅ Une section par Sensor : titre clair au-dessus, puis une rangée
+            // de cartes — une carte par Kanal — pour que le client comprenne
+            // immédiatement à quel Sensor appartient chaque Kanal affiché.
+            <Box key={device} sx={{ mb: "28px" }}>
+              <Box display="flex" alignItems="center" gap={1} sx={{ mb: "10px" }}>
+                <DeviceHubIcon style={{ color: PRIMARY_COLOR, fontSize: "1.3rem" }} />
+                <Typography variant="h6" style={{ fontWeight: 700, color: "#333" }}>{device}</Typography>
+                <Typography variant="caption" style={{ color: "#888" }}>({visibleKanaele.length} Kanäle)</Typography>
+              </Box>
+              <div style={{ display: "flex", gap: 15, flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>
                 {visibleKanaele.map(k => (
-                  <Box key={k.kanal} sx={{ mb: "10px" }}>
-                    <Box display="flex" alignItems="center" gap={0.8} sx={{ mb: "2px" }}>
+                  <Paper key={`${device}_${k.kanal}`} elevation={1} onClick={() => { setDetailDevice(device); setDetailKanal(k.kanal); }}
+                    style={{ padding: 10, backgroundColor: "#fff", borderRadius: 8, cursor: "pointer",
+                      minWidth: isMobile ? "100%" : 220, flex: isMobile ? "1 1 100%" : "1 1 240px",
+                      transition: "transform 0.15s, box-shadow 0.15s" }}
+                    onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.01)"; e.currentTarget.style.boxShadow = "0 6px 12px rgba(0,0,0,0.1)"; }}
+                    onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)";    e.currentTarget.style.boxShadow = ""; }}>
+                    <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1 }}>
                       <Box sx={{ width: 10, height: 10, borderRadius: "50%", backgroundColor: KANAL_COLORS[k.kanal] || "#999", flexShrink: 0 }} />
-                      <Typography variant="body1" style={{ color: "#222", fontWeight: 700, fontSize: "1.05rem", lineHeight: 1.2 }}>
-                        {k.Bezeichnung ? k.Bezeichnung : (KANAL_LABELS[k.kanal] || k.kanal)}
-                      </Typography>
-                      <Typography variant="caption" style={{ color: "#999" }}>
-                        (Kanal {k.kanal})
-                      </Typography>
+                      <Typography variant="caption" style={{ color: "#888", flex: 1 }}>Kanal {k.kanal}</Typography>
                     </Box>
+                    <Typography variant="body1" style={{ color: "#222", fontWeight: 700, fontSize: "1rem", lineHeight: 1.2, marginBottom: 4 }}>
+                      {k.Bezeichnung ? k.Bezeichnung : (KANAL_LABELS[k.kanal] || k.kanal)}
+                    </Typography>
+                    <Divider style={{ marginBottom: 8, backgroundColor: "#e0e0e0" }} />
                     {cardMetrics.map(m => {
                       if (!shouldShowMetric(m.value)) return null;
                       const Icon = m.icon;
                       return (
-                        <Box key={m.value} display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: "4px", pl: 1 }}>
+                        <Box key={m.value} display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: "4px" }}>
                           <Box display="flex" alignItems="center" gap={0.8}>
                             <Icon style={{ color: "#888", fontSize: "0.8rem" }} />
-                            <Typography variant="caption" style={{ color: "#666" }}>{m.label.split(" ")[0]}:</Typography>
+                            <Typography variant="caption" style={{ color: "#666" }}>{m.value === "CosinusPhi" ? "Cosinus Phi:" : m.label.split(" ")[0] + ":"}</Typography>
                           </Box>
                           <Box sx={{ bgcolor: "#e0e0e0", px: "8px", py: "2px", borderRadius: "4px", minWidth: 90, textAlign: "center" }}>
                             <Typography variant="caption" style={{ fontWeight: 500, color: "#222" }}>
@@ -1263,12 +1265,12 @@ const MappingManager = () => {
                         </Box>
                       );
                     })}
-                  </Box>
+                  </Paper>
                 ))}
-              </Paper>
-            );
-          })}
-        </div>
+              </div>
+            </Box>
+          );
+        })
       )}
     </>
   );
