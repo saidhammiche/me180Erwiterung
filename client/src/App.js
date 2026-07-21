@@ -410,11 +410,9 @@ const ChannelConfigManager = () => {
 // ✅ Vue avec la même mise en page/style que ChannelConfigManager ci-dessus
 // (Paper, tableau, groupes colorés, bouton "Alle speichern"), appliquée
 // aux Sensoren découverts dynamiquement (via /sensors-discovery), 4 Kanal
-// (1-4) par Sensor : Bezeichnung éditable + LIVE DATEN (Strom / Wirkleistung
-// / Energie uniquement, rafraîchies automatiquement toutes les 3s).
+// (1-4) par Sensor : Bezeichnung éditable uniquement (plus de Live Daten
+// affichées dans cette vue — voir KanalCard ci-dessous).
 // Enregistrement via /kundendaten-labels (backend port 4000).
-// ✅ Mêmes 6 mesures que la vue "Live Daten" (METRIC_OPTIONS), avec les mêmes
-// icônes — Kundendaten n'affiche plus seulement 3 valeurs mais l'ensemble.
 const KUNDEN_LIVE_METRICS = [
   { value: "Strom",         label: "Strom (A)",          icon: ElectricBoltIcon,        decimals: 3, unit: "A"   },
   { value: "CosinusPhi",    label: "Cosinus Phi",         icon: FunctionsIcon,           decimals: 4, unit: ""    },
@@ -530,12 +528,12 @@ const SensorConfigManager = () => {
   const col2 = groups.slice(chunkSize, chunkSize * 2);
   const col3 = groups.slice(chunkSize * 2);
 
-  // ── Carte d'un Kanal, même mise en page qu'un ChannelCard de "Live Daten" ──
-  const KanalCard = ({ device, kanal, exists, ...liveValues }) => {
+  // ── Carte d'un Kanal : uniquement Kanal + Bezeichnung (plus de Live Daten) ──
+  const KanalCard = ({ device, kanal, exists }) => {
     const key = `${device}_${kanal}`;
     return (
       <Paper elevation={1} style={{ padding: 10, backgroundColor: "#fff", borderRadius: 8, marginBottom: 10 }}>
-        <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1 }}>
+        <Box display="flex" alignItems="center" gap={1}>
           <Box sx={{ width: 10, height: 10, borderRadius: "50%", backgroundColor: KANAL_COLORS[kanal] || "#999", flexShrink: 0 }} />
           <Typography variant="subtitle2" style={{ fontWeight: 600, color: PRIMARY_COLOR, fontSize: "0.85rem" }}>Kanal {kanal}</Typography>
           <Box flex={1} />
@@ -547,25 +545,6 @@ const SensorConfigManager = () => {
             InputProps={{ style: { color: "#000", fontSize: "0.85rem", fontWeight: 600, backgroundColor: "#f5f5f5", padding: 0 } }}
             inputProps={{ style: { padding: "6px 8px" } }} />
         </Box>
-        <Divider style={{ marginBottom: 8, backgroundColor: "#e0e0e0" }} />
-        {KUNDEN_LIVE_METRICS.map(m => {
-          const Icon = m.icon;
-          return (
-            <Box key={m.value} display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: "6px" }}>
-              <Box display="flex" alignItems="center" gap={0.8}>
-                <Icon style={{ color: "#888", fontSize: "0.85rem" }} />
-                <Typography variant="caption" style={{ color: "#666" }}>
-                  {m.value === "CosinusPhi" ? "Cosinus Phi:" : m.label.split(" ")[0] + ":"}
-                </Typography>
-              </Box>
-              <Box sx={{ bgcolor: "#e0e0e0", px: "8px", py: "2px", borderRadius: "4px", minWidth: 100, textAlign: "center" }}>
-                <Typography variant="caption" style={{ fontWeight: 500, color: exists ? "#222" : "#aaa" }}>
-                  {exists ? formatValue(liveValues[m.value], m.decimals, m.unit) : "—"}
-                </Typography>
-              </Box>
-            </Box>
-          );
-        })}
       </Paper>
     );
   };
