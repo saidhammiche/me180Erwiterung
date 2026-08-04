@@ -235,6 +235,11 @@ function initEnergyConfig() {
 }
 initEnergyConfig();
 
+// ✅ Tolérance numérique pour comparer deux valeurs d'énergie (évite les faux
+// "changements" dus à des arrondis flottants lors de la relecture CGI).
+const ENERGY_EPSILON = 1e-6;
+const hasEnergyChanged = (a, b) => Math.abs((a ?? 0) - (b ?? 0)) > ENERGY_EPSILON;
+
 // ========== ROUTES MAPPING (CH -> Sensor/Kanal, inchangé) ==========
 
 app.get("/mapping", (req, res) => {
@@ -478,24 +483,32 @@ app.post("/config", async (req, res) => {
 
 // ========== ROUTES ENERGIE ==========
 
+// ✅ CORRECTION : "updatedAt" ne doit refléter que le moment où la valeur d'un
+// canal a réellement changé — pas le moment où la route a été appelée. Avant,
+// Date.now() était écrit pour LES 18 canaux à chaque appel (polling 30s côté
+// frontend), donc "Letzte Änderung" affichait "gerade eben" partout même si un
+// seul canal avait été modifié. On compare désormais à la valeur en cache et on
+// ne touche l'horodatage que pour les canaux dont la valeur a bougé.
 app.get("/energy-values", async (req, res) => {
     try {
         const { temporary } = await getEnergiesFromMesskoffer();
 
         const result = {};
         for (const ch of channelsList) {
+            const previous   = energyConfig[ch] || { temporary: 0, updatedAt: 0 };
+            const newTemp     = temporary[ch] ?? previous.temporary ?? 0;
+            const changed     = hasEnergyChanged(newTemp, previous.temporary);
+            const updatedAt   = changed ? Date.now() : previous.updatedAt;
+
             result[ch] = {
                 label:     channelConfig[ch]?.label || ch,
                 // ✅ Uniquement les 18 dernières valeurs (temporaires) du CGI Messkoffer,
                 // jamais les valeurs cumulées d'InfluxDB.
-                temporary: temporary[ch] ?? energyConfig[ch]?.temporary ?? 0,
-                updatedAt: Date.now()
+                temporary: newTemp,
+                updatedAt
             };
 
-            energyConfig[ch] = {
-                temporary: result[ch].temporary,
-                updatedAt: result[ch].updatedAt
-            };
+            energyConfig[ch] = { temporary: newTemp, updatedAt };
         }
 
         res.json(result);
@@ -505,7 +518,8 @@ app.get("/energy-values", async (req, res) => {
     }
 });
 
-// ✅ CORRECTION : délai 2s avant relecture Messkoffer
+// ✅ CORRECTION : délai 2s avant relecture Messkoffer, + même correction
+// "updatedAt" que ci-dessus dans la boucle de relecture finale.
 app.post("/energy-values/set", async (req, res) => {
     const updates = req.body;
     if (typeof updates !== "object") return res.status(400).json({ error: "JSON-Objekt erwartet" });
@@ -515,7 +529,7 @@ app.post("/energy-values/set", async (req, res) => {
             if (!channelsList.includes(ch)) continue;
             const oldTemp = energyConfig[ch]?.temporary || 0;
             const newTemp = cfg.temporary !== undefined ? parseFloat(cfg.temporary) : oldTemp;
-            if (newTemp === oldTemp) continue;
+            if (!hasEnergyChanged(newTemp, oldTemp)) continue;
 
             const chNum = parseInt(ch.substring(2), 10);
 
@@ -533,8 +547,9 @@ app.post("/energy-values/set", async (req, res) => {
                 writeApi.writePoint(point);
             }
 
-            // ✅ Mettre à jour le cache local immédiatement
-            energyConfig[ch] = { ...energyConfig[ch], temporary: newTemp, updatedAt: Date.now() };
+            // ✅ Mettre à jour le cache local immédiatement — seul ce canal reçoit
+            // un nouvel horodatage, puisque c'est le seul dont la valeur a changé.
+            energyConfig[ch] = { temporary: newTemp, updatedAt: Date.now() };
         }
         await writeApi.flush();
 
@@ -544,19 +559,25 @@ app.post("/energy-values/set", async (req, res) => {
         const { temporary } = await getEnergiesFromMesskoffer();
         const result = {};
         for (const ch of channelsList) {
+            const previous = energyConfig[ch] || { temporary: 0, updatedAt: 0 };
+            // ✅ Si Messkoffer retourne encore 0, on garde la valeur du cache local
+            const confirmedTemp = (temporary[ch] && temporary[ch] > 0)
+                ? temporary[ch]
+                : previous.temporary ?? 0;
+            // ✅ On ne rafraîchit l'horodatage que si cette relecture révèle un
+            // changement par rapport à ce qui était déjà en cache (ex: le canal
+            // qu'on vient de modifier). Les autres canaux, non touchés, gardent
+            // leur "Letzte Änderung" d'origine.
+            const changed   = hasEnergyChanged(confirmedTemp, previous.temporary);
+            const updatedAt = changed ? Date.now() : previous.updatedAt;
+
             result[ch] = {
                 label:     channelConfig[ch]?.label || ch,
-                // ✅ Si Messkoffer retourne encore 0, on garde la valeur du cache local
-                temporary: (temporary[ch] && temporary[ch] > 0)
-                    ? temporary[ch]
-                    : energyConfig[ch]?.temporary ?? 0,
-                updatedAt: Date.now()
+                temporary: confirmedTemp,
+                updatedAt
             };
             // ✅ Mettre à jour le cache avec la valeur confirmée
-            energyConfig[ch] = {
-                temporary: result[ch].temporary,
-                updatedAt: result[ch].updatedAt
-            };
+            energyConfig[ch] = { temporary: confirmedTemp, updatedAt };
         }
         res.json({ success: true, config: result });
     } catch (err) {
@@ -681,9 +702,12 @@ app.get("/data", async (req, res) => {
 
 // ========== ROUTE HISTORY ==========
 // ✅ Source désormais : measurement "mego", Device "mE180", filtré par Kanal=CHx
-// et Label=<label CGI actuel du canal>. Energie n'est plus lue depuis InfluxDB ici
-// (le Messkoffer/cache local ne fournit pas d'historique, donc Energie_temp n'apparaît
-// plus dans l'historique pour les canaux migrés vers mego).
+// et Label=<label CGI actuel du canal>.
+// ✅ CORRECTION : le champ "Energie" a été ajouté au filtre _field et à l'extraction
+// pointsByTime. Auparavant seuls Strom/Wirkleistung/Leistungsfaktor étaient demandés,
+// donc l'onglet Trends affichait "Keine historische Daten" pour Energie même quand
+// la valeur (ex: 35k) existait bel et bien dans InfluxDB — la requête ne la demandait
+// simplement jamais.
 
 app.get("/history/:channel", async (req, res) => {
     const { channel } = req.params;
@@ -705,7 +729,7 @@ app.get("/history/:channel", async (req, res) => {
           |> filter(fn: (r) => r.Device == "${MEGO_DEVICE}")
           |> filter(fn: (r) => r.Kanal  == "${ch}")
           |> filter(fn: (r) => r.Label  == "${safeLabel}")
-          |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor")
+          |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor" or r._field == "Energie")
           |> aggregateWindow(every: 10s, fn: mean, createEmpty: false)
           |> sort(columns: ["_time"])
     `;
@@ -719,6 +743,7 @@ app.get("/history/:channel", async (req, res) => {
             if      (row._field === "Strom")          pointsByTime[t].Strom        = row._value;
             else if (row._field === "Wirkleistung")   pointsByTime[t].Wirkleistung = row._value;
             else if (row._field === "Leistungsfaktor") pointsByTime[t].CosinusPhi  = row._value;
+            else if (row._field === "Energie")        pointsByTime[t].Energie      = row._value;
         });
         const data = Object.values(pointsByTime)
             .map(point => {
