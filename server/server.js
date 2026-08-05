@@ -34,7 +34,23 @@ if (!MESSE_IP || !MESSE_ID) {
     process.exit(1);
 }
 
-const channelsList = Array.from({ length: 18 }, (_, i) => `CH${i + 1}`);
+// ✅ Nouveau nommage des 18 canaux physiques (aligné avec le flow Node-RED) :
+// CH1 a..f (phase L1), CH2 g..l (phase L2), CH3 m..r (phase L3).
+// L'ORDRE est important : il correspond à la position 1..18 des CGI Messkoffer
+// (labels, scaleend, threshold, énergies) et à l'ordre d'écriture Node-RED.
+const channelsList = [
+    "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
+    "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
+    "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
+];
+
+// ✅ Les noms de canaux ne contiennent plus le numéro CGI (contrairement à
+// l'ancien "CH7" -> 7), donc on ne peut plus faire parseInt(ch.substring(2)).
+// On retrouve l'index CGI (1-18) via la position dans channelsList.
+function getChannelNumber(ch) {
+    const idx = channelsList.indexOf(ch);
+    return idx === -1 ? null : idx + 1;
+}
 
 // ========== MAPPING CH -> Device+Kanal ==========
 let channelMapping = {};
@@ -58,7 +74,8 @@ initMapping();
 let channelConfig = {};
 
 function getDefaultHoechstwert(ch) {
-    return ch === "CH1" || ch === "CH7" || ch === "CH13" ? 64 : 32;
+    // ✅ Premiers canaux de chaque phase avec le nouveau nommage
+    return ch === "CH1 a" || ch === "CH2 g" || ch === "CH3 m" ? 64 : 32;
 }
 
 function initConfig() {
@@ -89,7 +106,8 @@ async function getLabelsFromMesskoffer() {
             : [];
         const result = {};
         for (let i = 0; i < 18; i++) {
-            result[`CH${i + 1}`] = (parts[i] !== undefined && parts[i] !== "") ? parts[i] : `CH${i + 1}`;
+            // ✅ CORRECTION : clé = nouveau nom de canal (channelsList[i]) au lieu de CH${i+1}
+            result[channelsList[i]] = (parts[i] !== undefined && parts[i] !== "") ? parts[i] : channelsList[i];
         }
         return result;
     } catch (err) {
@@ -106,7 +124,8 @@ async function getScaleendFromMesskoffer() {
         const result = {};
         for (let i = 0; i < 18; i++) {
             const val = parseFloat(parts[i]);
-            result[`CH${i + 1}`] = !isNaN(val) ? val : 32;
+            // ✅ CORRECTION : clé = nouveau nom de canal
+            result[channelsList[i]] = !isNaN(val) ? val : 32;
         }
         return result;
     } catch (err) {
@@ -123,7 +142,8 @@ async function getThresholdFromMesskoffer() {
         const result = {};
         for (let i = 0; i < 18; i++) {
             const val = parseFloat(parts[i]);
-            result[`CH${i + 1}`] = !isNaN(val) ? val / 1000 : 0;
+            // ✅ CORRECTION : clé = nouveau nom de canal
+            result[channelsList[i]] = !isNaN(val) ? val / 1000 : 0;
         }
         return result;
     } catch (err) {
@@ -182,7 +202,8 @@ async function getEnergiesFromMesskoffer() {
             // Index 1-18  = énergies cumulées (ignorées, non désirées).
             // Index 19-36 = énergies temporaires des 18 derniers canaux (celles qu'on veut).
             for (let i = 0; i < 18; i++) {
-                temporary[`CH${i + 1}`] = (values[19 + i] || 0) / 10000;
+                // ✅ CORRECTION : clé = nouveau nom de canal
+                temporary[channelsList[i]] = (values[19 + i] || 0) / 10000;
             }
         }
         return { temporary };
@@ -371,15 +392,15 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
     }
 });
 
-// ========== ROUTE DEBUG TEMPORAIRE (diagnostic mego) ==========
+// ========== ROUTE DEBUG TEMPORAIRE (diagnostic mego3) ==========
 // ⚠️ Route de diagnostic uniquement, à supprimer une fois le problème résolu.
-// Retourne les 20 dernières lignes brutes du champ "Strom" du measurement "mego",
+// Retourne les 20 dernières lignes brutes du champ "Strom" du measurement "mego3",
 // sans AUCUN filtre Device/Kanal/Label, pour voir les vraies valeurs des tags en base.
-app.get("/debug-mego", async (req, res) => {
+app.get("/debug-mego3", async (req, res) => {
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
           |> range(start: -24h)
-          |> filter(fn: (r) => r["_measurement"] == "mego")
+          |> filter(fn: (r) => r["_measurement"] == "mego3")
           |> filter(fn: (r) => r["_field"] == "Strom")
           |> keep(columns: ["_time", "_value", "Device", "Kanal", "Label"])
           |> limit(n: 20)
@@ -388,7 +409,7 @@ app.get("/debug-mego", async (req, res) => {
         const rows = await queryApi.collectRows(fluxQuery);
         res.json({ count: rows.length, rows });
     } catch (err) {
-        console.error("/debug-mego error:", err);
+        console.error("/debug-mego3 error:", err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -449,7 +470,9 @@ app.post("/config", async (req, res) => {
             const newLabel   = cfg.label       !== undefined ? cfg.label                   : old.label;
             const newSchwell = cfg.schwellwert  !== undefined ? parseFloat(cfg.schwellwert) : old.schwellwert;
             const newHoe     = cfg.hoechstwert  !== undefined ? parseFloat(cfg.hoechstwert) : old.hoechstwert;
-            const chNum      = parseInt(ch.substring(2), 10);
+            // ✅ CORRECTION : "CH1 a" n'a plus de chiffre exploitable par substring(2) —
+            // on retrouve le numéro CGI (1-18) via la position dans channelsList.
+            const chNum      = getChannelNumber(ch);
 
             if (cfg.label !== undefined && cfg.label !== old.label)
                 await setLabelToMesskoffer(chNum, newLabel);
@@ -531,7 +554,8 @@ app.post("/energy-values/set", async (req, res) => {
             const newTemp = cfg.temporary !== undefined ? parseFloat(cfg.temporary) : oldTemp;
             if (!hasEnergyChanged(newTemp, oldTemp)) continue;
 
-            const chNum = parseInt(ch.substring(2), 10);
+            // ✅ CORRECTION : "CH1 a" n'a plus de chiffre exploitable par substring(2)
+            const chNum = getChannelNumber(ch);
 
             // 1. Envoyer au Messkoffer
             await setEnergyToMesskoffer(chNum, newTemp);
@@ -599,34 +623,40 @@ function computeApparentAndReactive(P, cosPhi) {
 }
 
 // ========== ROUTE DATA (Echtzeit) ==========
-// ✅ Source désormais : measurement "mego", Device "mE180" (données Node-RED),
+// ✅ Source désormais : measurement "mego3", Device "mE180" (données Node-RED),
 // filtrées par Kanal=CHx ET Label=<label CGI actuel du canal>.
-// Spannung reste via /voltages (CGI Messkoffer). Energie reste via cache/CGI (jamais mego).
+// Spannung reste via /voltages (CGI Messkoffer). Energie reste via cache/CGI (jamais mego3).
 
-const MEGO_MEASUREMENT = "mego";
-const MEGO_DEVICE      = "mE180";
+const mego3_MEASUREMENT = "mego3";
+const mego3_DEVICE      = "mE180";
 
 app.get("/data", async (req, res) => {
     try {
-        // ✅ énergies depuis Messkoffer (inchangé)
-        const { temporary: messeEnergy } = await getEnergiesFromMesskoffer();
-
-        // ✅ tensions depuis Messkoffer CGI (inchangé, indépendant de mego)
-        let voltagesU = { 1: 0, 2: 0, 3: 0 };
-        try {
-            const url      = `http://${MESSE_IP}/get_live_values.cgi?id=${MESSE_ID}&ch=18`;
-            const response = await axios.get(url, { timeout: 5000 });
-            const values   = typeof response.data === "string"
-                ? response.data.split(";").map(v => parseFloat(v.trim()))
-                : [];
-            voltagesU = {
-                1: !isNaN(values[1]) ? values[1] / 100 : 0,
-                2: !isNaN(values[2]) ? values[2] / 100 : 0,
-                3: !isNaN(values[3]) ? values[3] / 100 : 0
-            };
-        } catch (err) {
-            console.error("[/data] Fehler Spannungen:", err.message);
-        }
+        // ✅ CORRECTION PERFORMANCE : énergies + tensions Messkoffer en PARALLÈLE.
+        // Avant : deux "await" successifs (getEnergiesFromMesskoffer() puis l'appel
+        // voltages), donc le temps de réponse de chaque CGI s'additionnait (ex: 5s+5s
+        // = 10s+ avant que le front reçoive quoi que ce soit). Avec Promise.all, le
+        // temps total redescend au maximum des deux appels au lieu de leur somme.
+        const [{ temporary: messeEnergy }, voltagesU] = await Promise.all([
+            getEnergiesFromMesskoffer(),
+            (async () => {
+                try {
+                    const url      = `http://${MESSE_IP}/get_live_values.cgi?id=${MESSE_ID}&ch=18`;
+                    const response = await axios.get(url, { timeout: 5000 });
+                    const values   = typeof response.data === "string"
+                        ? response.data.split(";").map(v => parseFloat(v.trim()))
+                        : [];
+                    return {
+                        1: !isNaN(values[1]) ? values[1] / 100 : 0,
+                        2: !isNaN(values[2]) ? values[2] / 100 : 0,
+                        3: !isNaN(values[3]) ? values[3] / 100 : 0
+                    };
+                } catch (err) {
+                    console.error("[/data] Fehler Spannungen:", err.message);
+                    return { 1: 0, 2: 0, 3: 0 };
+                }
+            })()
+        ]);
 
         // ✅ Une requête Flux par canal, car le filtre Label dépend du label CGI courant
         // de chaque canal (peut différer d'un canal à l'autre).
@@ -636,8 +666,8 @@ app.get("/data", async (req, res) => {
             return `
                 from(bucket: "${INFLUX_BUCKET}")
                   |> range(start: -10m)
-                  |> filter(fn: (r) => r._measurement == "${MEGO_MEASUREMENT}")
-                  |> filter(fn: (r) => r.Device == "${MEGO_DEVICE}")
+                  |> filter(fn: (r) => r._measurement == "${mego3_MEASUREMENT}")
+                  |> filter(fn: (r) => r.Device == "${mego3_DEVICE}")
                   |> filter(fn: (r) => r.Kanal  == "${ch}")
                   |> filter(fn: (r) => r.Label  == "${safeLabel}")
                   |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor")
@@ -665,8 +695,14 @@ app.get("/data", async (req, res) => {
 
         const result = {};
         for (const ch of channelsList) {
-            const chNum     = parseInt(ch.substring(2), 10);
-            const voltKanal = chNum <= 3 ? chNum : 1;
+            // ✅ CORRECTION : "CH1 a" n'a plus de chiffre exploitable par substring(2).
+            // On détermine la phase (L1/L2/L3) via la position du canal dans channelsList :
+            // index 0-5 -> phase 1, 6-11 -> phase 2, 12-17 -> phase 3.
+            // (Au passage, ceci corrige aussi un bug préexistant : l'ancien code
+            // n'assignait la bonne phase qu'aux canaux CH1/CH2/CH3, tous les autres
+            // retombaient par défaut sur voltKanal=1/L1.)
+            const idx       = channelsList.indexOf(ch);
+            const voltKanal = idx < 6 ? 1 : (idx < 12 ? 2 : 3);
             const U = voltagesU[voltKanal] ?? null;
             const influxData = byChannel[ch] || {};
             const I = influxData.Strom        ?? null;
@@ -679,7 +715,7 @@ app.get("/data", async (req, res) => {
                 Wirkleistung: P,
                 Spannung:     U,
                 CosinusPhi:   cosPhi,
-                // ✅ Energie : Messkoffer en priorité, cache local ensuite — jamais depuis mego
+                // ✅ Energie : Messkoffer en priorité, cache local ensuite — jamais depuis mego3
                 Energie_temp: (messeEnergy[ch] && messeEnergy[ch] > 0)
                     ? messeEnergy[ch]
                     : (energyConfig[ch]?.temporary && energyConfig[ch].temporary > 0)
@@ -701,7 +737,7 @@ app.get("/data", async (req, res) => {
 });
 
 // ========== ROUTE HISTORY ==========
-// ✅ Source désormais : measurement "mego", Device "mE180", filtré par Kanal=CHx
+// ✅ Source désormais : measurement "mego3", Device "mE180", filtré par Kanal=CHx
 // et Label=<label CGI actuel du canal>.
 // ✅ CORRECTION : le champ "Energie" a été ajouté au filtre _field et à l'extraction
 // pointsByTime. Auparavant seuls Strom/Wirkleistung/Leistungsfaktor étaient demandés,
@@ -711,7 +747,10 @@ app.get("/data", async (req, res) => {
 
 app.get("/history/:channel", async (req, res) => {
     const { channel } = req.params;
-    const ch = channel.toUpperCase();
+    // ✅ CORRECTION : ne plus forcer .toUpperCase() — les nouveaux noms de canaux
+    // contiennent des minuscules ("CH1 a"..."CH3 r"), toUpperCase() les cassait
+    // ("CH1 A" ne matchait plus jamais channelsList).
+    const ch = channel;
     if (!channelsList.includes(ch)) {
         return res.status(400).json({ error: "Ungültiger Kanal" });
     }
@@ -725,8 +764,8 @@ app.get("/history/:channel", async (req, res) => {
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
           |> range(start: -${duration})
-          |> filter(fn: (r) => r._measurement == "${MEGO_MEASUREMENT}")
-          |> filter(fn: (r) => r.Device == "${MEGO_DEVICE}")
+          |> filter(fn: (r) => r._measurement == "${mego3_MEASUREMENT}")
+          |> filter(fn: (r) => r.Device == "${mego3_DEVICE}")
           |> filter(fn: (r) => r.Kanal  == "${ch}")
           |> filter(fn: (r) => r.Label  == "${safeLabel}")
           |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor" or r._field == "Energie")

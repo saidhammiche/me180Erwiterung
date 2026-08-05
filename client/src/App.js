@@ -50,6 +50,16 @@ const PRIMARY_COLOR = "#7cbbcd";
 const formatChannelName  = (ch) => ch;
 const formatChannelShort = (ch) => ch;
 
+// ✅ Nouveau nommage des 18 canaux physiques (aligné avec le backend et le flow
+// Node-RED) : CH1 a..f (phase L1), CH2 g..l (phase L2), CH3 m..r (phase L3).
+// Utilisé uniquement comme SECOURS si /config est injoignable au démarrage —
+// en fonctionnement normal, orderedChannels vient directement de /config.
+const DEFAULT_CHANNELS = [
+  "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
+  "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
+  "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
+];
+
 // ── Design-Tokens (Enterprise / Industrie) ────────────────────────────────
 // Angelehnt an die reale DIN/IEC-Aderfarbe der drei Phasenleiter (L1 braun,
 // L2 schwarz, L3 grau) — so bleibt die Farbcodierung fachlich korrekt und
@@ -75,7 +85,7 @@ const PHASE_STYLES = [
 ];
 
 // ✅ CORRECTION : "Energie_temp" → "Energie" pour correspondre au champ réel
-// renvoyé par /history/:channel (measurement "mego"), sinon dataKey="Energie_temp"
+// renvoyé par /history/:channel (measurement "mego3"), sinon dataKey="Energie_temp"
 // de <Line> dans GraphDetail ne trouve jamais la valeur et le graphique reste vide
 // ("Keine historische Daten" alors que la valeur existe bien dans InfluxDB).
 const METRIC_LABELS = {
@@ -1323,9 +1333,9 @@ function App() {
     axios.get(`${API_BASE_URL}/config`)
       .then(res => {
         const keys = Object.keys(res.data).filter(k => !k.startsWith("L"));
-        setOrderedChannels(keys.length > 0 ? keys : Array.from({ length: 18 }, (_, i) => `CH${i + 1}`));
+        setOrderedChannels(keys.length > 0 ? keys : DEFAULT_CHANNELS);
       })
-      .catch(() => setOrderedChannels(Array.from({ length: 18 }, (_, i) => `CH${i + 1}`)));
+      .catch(() => setOrderedChannels(DEFAULT_CHANNELS));
   }, []);
 
   const fetchVoltages = async () => {
@@ -1353,7 +1363,10 @@ function App() {
     if (view !== "graphDetail" || !selectedChannel || isMouseOverGraph) return;
     const update = async () => {
       try {
-        const res = await axios.get(`${API_BASE_URL}/history/${selectedChannel}?time=${timeRange}`);
+        // ✅ CORRECTION : encodeURIComponent — les nouveaux noms de canaux
+        // contiennent un espace ("CH1 a"), il faut l'encoder dans l'URL,
+        // sinon la requête HTTP part malformée ou tronquée à l'espace.
+        const res = await axios.get(`${API_BASE_URL}/history/${encodeURIComponent(selectedChannel)}?time=${timeRange}`);
         if (res.data?.data) setHistoryData(res.data.data);
       } catch (err) { console.error("Erreur historique:", err); }
     };
