@@ -50,6 +50,29 @@ const PRIMARY_COLOR = "#7cbbcd";
 const formatChannelName  = (ch) => ch;
 const formatChannelShort = (ch) => ch;
 
+// ✅ Décodage sûr des labels : certains labels remontent du backend sous forme
+// percent-encodée (ex. "Lüftung" → "L%FCftung") si l'encodage UTF-8 n'a pas été
+// respecté à l'enregistrement. On tente un decodeURIComponent uniquement si la
+// chaîne contient un "%" suivi de 2 caractères hexadécimaux ; sinon on la laisse
+// intacte pour ne jamais casser un label qui contient un "%" légitime (ex. "50%").
+const safeDecodeLabel = (str) => {
+  if (typeof str !== "string" || str.length === 0) return str;
+  if (!/%[0-9A-Fa-f]{2}/.test(str)) return str;
+  // 1) Cas UTF-8 percent-encodé standard (ex. "%C3%BC" pour "ü").
+  try {
+    const viaUri = decodeURIComponent(str);
+    if (viaUri !== str) return viaUri;
+  } catch { /* pas de l'UTF-8 percent-encodé valide, on continue */ }
+  // 2) Cas Latin-1 à l'ancienne via escape() côté source (ex. "%FC" pour "ü",
+  //    0xFC = 252 = "ü" en Latin-1/Windows-1252). decodeURIComponent échoue
+  //    silencieusement (ou ne change rien) sur ce format ; unescape() le gère.
+  try {
+    const viaUnescape = unescape(str);
+    if (viaUnescape !== str) return viaUnescape;
+  } catch { /* ignore */ }
+  return str;
+};
+
 // ✅ Nouveau nommage des 18 canaux physiques (aligné avec le backend et le flow
 // Node-RED) : CH1 a..f (phase L1), CH2 g..l (phase L2), CH3 m..r (phase L3).
 // Utilisé uniquement comme SECOURS si /config est injoignable au démarrage —
@@ -335,7 +358,7 @@ const GraphDetail = ({ selectedChannel, historyData, isMouseOverGraph, setIsMous
         </Menu>
 
         <Typography variant="caption" style={{ color: "#666" }}>
-          {isMouseOverGraph ? "⏸ Pause (Maus über Grafik)" : "🔄 Aktualisierung alle 1 Sekunde"}
+          {isMouseOverGraph ? "⏸ Pause (Maus über Grafik)" : " Aktualisierung alle 1 Sekunde"}
         </Typography>
       </Paper>
 
@@ -404,8 +427,14 @@ const ChannelConfigManager = () => {
       const timeoutId  = setTimeout(() => controller.abort(), 5000);
       const res        = await axios.get(`${API_BASE_URL}/config`, { signal: controller.signal });
       clearTimeout(timeoutId);
-      setConfig(res.data);
-      setSavedConfig(res.data);
+      // ✅ On décode les labels dès la réception pour éviter d'afficher des
+      // séquences percent-encodées (ex. "L%FCftung") si le backend ne renvoie
+      // pas un UTF-8 propre.
+      const decoded = Object.fromEntries(
+        Object.entries(res.data).map(([ch, cfg]) => [ch, { ...cfg, label: safeDecodeLabel(cfg?.label) }])
+      );
+      setConfig(decoded);
+      setSavedConfig(decoded);
     } catch (err) {
       setMessageType("error");
       setMessage(err.name === "AbortError"
@@ -670,8 +699,12 @@ const EnergyManager = () => {
   const loadEnergyData = async () => {
     try {
       const res = await axios.get(`${API_BASE_URL}/energy-values`);
-      setEnergyData({ ...res.data });
-      return res.data;
+      // ✅ Décodage sûr des labels reçus (voir safeDecodeLabel plus haut).
+      const decoded = Object.fromEntries(
+        Object.entries(res.data).map(([ch, d]) => [ch, { ...d, label: safeDecodeLabel(d?.label) }])
+      );
+      setEnergyData(decoded);
+      return decoded;
     } catch {
       setMessageType("error");
       setMessage("❌ Fehler beim Laden der Energiedaten");
@@ -1057,7 +1090,7 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
         </Menu>
 
         <Typography variant="caption" style={{ color: "#666" }}>
-          {isMouseOverGraph ? "⏸ Pause (Maus über Grafik)" : "🔄 Aktualisierung alle 1 Sekunde"}
+          {isMouseOverGraph ? "⏸ Pause (Maus über Grafik)" : " Aktualisierung alle 1 Sekunde"}
         </Typography>
       </Paper>
 
@@ -1351,7 +1384,17 @@ function App() {
 
   useEffect(() => {
     const fetchData = async () => {
-      try { const res = await axios.get(`${API_BASE_URL}/data`); setData(res.data); setLoading(false); }
+      try {
+        const res = await axios.get(`${API_BASE_URL}/data`);
+        // ✅ Décodage sûr des labels affichés dans les cartes de canaux
+        // (voir safeDecodeLabel plus haut) — évite l'affichage de séquences
+        // percent-encodées comme "L%FCftung" au lieu de "Lüftung".
+        const decoded = Object.fromEntries(
+          Object.entries(res.data).map(([ch, d]) => [ch, { ...d, Label: safeDecodeLabel(d?.Label) }])
+        );
+        setData(decoded);
+        setLoading(false);
+      }
       catch (err) { console.error(err); setLoading(false); }
     };
     fetchData();
