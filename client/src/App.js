@@ -108,7 +108,7 @@ const PHASE_STYLES = [
 ];
 
 // ✅ CORRECTION : "Energie_temp" → "Energie" pour correspondre au champ réel
-// renvoyé par /history/:channel (measurement "mego3"), sinon dataKey="Energie_temp"
+// renvoyé par /history/:channel (measurement "mego4"), sinon dataKey="Energie_temp"
 // de <Line> dans GraphDetail ne trouve jamais la valeur et le graphique reste vide
 // ("Keine historische Daten" alors que la valeur existe bien dans InfluxDB).
 const METRIC_LABELS = {
@@ -139,10 +139,9 @@ const TIME_RANGE_OPTIONS = [
 ];
 
 const formatValue = (value, decimals = 3, unit = "") => {
-  if (value === undefined || value === null) return "—";
-  const num = parseFloat(value);
-  if (isNaN(num)) return "—";
-  return `${num.toFixed(decimals)}${unit ? " " + unit : ""}`;
+  const num = (value === undefined || value === null) ? 0 : parseFloat(value);
+  const safeNum = isNaN(num) ? 0 : num;
+  return `${safeNum.toFixed(decimals)}${unit ? " " + unit : ""}`;
 };
 
 const formatRelativeTime = (iso) => {
@@ -1437,7 +1436,7 @@ function App() {
   const shouldShowTrendChannel = ch  => trendSelectedChannels.length === 0 || trendSelectedChannels.includes(ch);
   const shouldShowTrendMetric  = key => trendSelectedMetrics.length === 0  || trendSelectedMetrics.includes(key);
 
-  const grafanaUrl = "http://192.168.1.20:3000/d/adkdpz6/energie?orgId=1&from=now-30m&to=now&timezone=browser&var-Kanal=CH1&refresh=5s";
+  const grafanaUrl = "http://192.168.1.20:3000/d/adkdpz6/energie?orgId=1&from=now-15m&to=now&timezone=browser&var-Kanal=CH1%20a&refresh=5s";
 
   // ── NavBar ──
   const NavBar = () => (

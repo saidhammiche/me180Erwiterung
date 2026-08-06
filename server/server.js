@@ -52,6 +52,13 @@ function getChannelNumber(ch) {
     return idx === -1 ? null : idx + 1;
 }
 
+// ✅ Canaux 5, 6, 11, 12, 17, 18 (les 5e/6e canaux de chaque phase : CH1 e/f,
+// CH2 k/l, CH3 q/r) ont un facteur d'échelle matériel différent : leurs valeurs
+// Strom/Wirkleistung doivent être multipliées par 10 (et donc, en cascade,
+// Scheinleistung/Blindleistung qui en dérivent). CosinusPhi, Energie et
+// Spannung (partagée par phase, pas propre au canal) ne sont JAMAIS concernés.
+const CHANNELS_SCALE_X10 = new Set(["CH1 e", "CH1 f", "CH2 k", "CH2 l", "CH3 q", "CH3 r"]);
+
 // ========== MAPPING CH -> Device+Kanal ==========
 let channelMapping = {};
 
@@ -82,6 +89,11 @@ function initConfig() {
     for (const ch of channelsList) {
         channelConfig[ch] = {
             label:       ch,
+            // ✅ rawLabel = label EXACTEMENT tel que le Messkoffer le renvoie
+            // (donc tel que Node-RED le tague dans InfluxDB), utilisé UNIQUEMENT
+            // pour filtrer les requêtes Flux (voir /data et /history). "label"
+            // reste la version décodée, destinée à l'affichage frontend.
+            rawLabel:    ch,
             schwellwert: 0,
             hoechstwert: getDefaultHoechstwert(ch),
             updatedAt:   0
@@ -92,22 +104,49 @@ initConfig();
 
 // ========== MESSKOFFER CGI HELPERS ==========
 
+// ✅ CORRECTION ENCODAGE LABELS : le Messkoffer renvoie parfois les labels avec
+// des caractères accentués percent-encodés en LATIN-1/Windows-1252 (ex. "ü" ->
+// "%FC", code 252) et non en UTF-8 standard (qui aurait donné "%C3%BC").
+// decodeURIComponent() lève une URIError sur "%FC" isolé (séquence UTF-8
+// invalide) : l'ancien code interceptait cette erreur et renvoyait la valeur
+// BRUTE inchangée ("L%FCftung"), qui remontait telle quelle jusqu'au frontend.
+// On tente donc decodeURIComponent() (cas UTF-8 percent-encodé), puis on se
+// rabat sur unescape() (cas Latin-1 à l'ancienne, qui correspond à notre cas
+// réel avec le Messkoffer).
+function decodeMesskofferLabel(v) {
+    if (typeof v !== "string" || v.length === 0) return v;
+    const withSpaces = v.replace(/\+/g, " ");
+    if (!/%[0-9A-Fa-f]{2}/.test(withSpaces)) return withSpaces;
+    try {
+        const viaUri = decodeURIComponent(withSpaces);
+        if (viaUri !== withSpaces) return viaUri;
+    } catch { /* pas de l'UTF-8 percent-encodé valide, on continue */ }
+    try {
+        const viaUnescape = unescape(withSpaces);
+        if (viaUnescape !== withSpaces) return viaUnescape;
+    } catch { /* ignore */ }
+    return withSpaces;
+}
+
 async function getLabelsFromMesskoffer() {
     const url = `http://${MESSE_IP}/get_sensor_config.cgi?id=${MESSE_ID}&sensor=ch&field=label`;
     try {
         console.log(`[Messkoffer] GET labels: ${url}`);
-        const res  = await axios.get(url, { timeout: 5000 });
-        const raw  = res.data;
-        const parts = typeof raw === "string"
-            ? raw.split(";").map(v => {
-                try { return decodeURIComponent(v.replace(/\+/g, " ")); }
-                catch { return v; }
-              })
-            : [];
+        const res       = await axios.get(url, { timeout: 5000 });
+        const raw       = res.data;
+        const rawParts  = typeof raw === "string" ? raw.split(";") : [];
+        // ✅ rawLabel : juste le "+" -> espace, SANS décodage percent — c'est
+        // cette forme brute que Node-RED utilise pour tagger InfluxDB, donc
+        // c'est elle qu'il faut réutiliser pour filtrer les requêtes Flux.
+        // label : version décodée, pour l'affichage dans le frontend.
         const result = {};
         for (let i = 0; i < 18; i++) {
-            // ✅ CORRECTION : clé = nouveau nom de canal (channelsList[i]) au lieu de CH${i+1}
-            result[channelsList[i]] = (parts[i] !== undefined && parts[i] !== "") ? parts[i] : channelsList[i];
+            const rawVal     = rawParts[i] !== undefined ? rawParts[i].replace(/\+/g, " ") : "";
+            const decodedVal = decodeMesskofferLabel(rawParts[i] ?? "");
+            result[channelsList[i]] = {
+                label:    (decodedVal && decodedVal !== "") ? decodedVal : channelsList[i],
+                rawLabel: (rawVal && rawVal !== "")         ? rawVal     : channelsList[i]
+            };
         }
         return result;
     } catch (err) {
@@ -236,7 +275,8 @@ async function initConfigFromMesskoffer() {
     ]);
     for (const ch of channelsList) {
         channelConfig[ch] = {
-            label:       labels?.[ch]     || ch,
+            label:       labels?.[ch]?.label    || ch,
+            rawLabel:    labels?.[ch]?.rawLabel  || ch,
             hoechstwert: scaleends?.[ch]  || getDefaultHoechstwert(ch),
             schwellwert: thresholds?.[ch] || 0,
             updatedAt:   Date.now()
@@ -392,15 +432,15 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
     }
 });
 
-// ========== ROUTE DEBUG TEMPORAIRE (diagnostic mego3) ==========
+// ========== ROUTE DEBUG TEMPORAIRE (diagnostic mego4) ==========
 // ⚠️ Route de diagnostic uniquement, à supprimer une fois le problème résolu.
-// Retourne les 20 dernières lignes brutes du champ "Strom" du measurement "mego3",
+// Retourne les 20 dernières lignes brutes du champ "Strom" du measurement "mego4",
 // sans AUCUN filtre Device/Kanal/Label, pour voir les vraies valeurs des tags en base.
-app.get("/debug-mego3", async (req, res) => {
+app.get("/debug-mego4", async (req, res) => {
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
           |> range(start: -24h)
-          |> filter(fn: (r) => r["_measurement"] == "mego3")
+          |> filter(fn: (r) => r["_measurement"] == "mego4")
           |> filter(fn: (r) => r["_field"] == "Strom")
           |> keep(columns: ["_time", "_value", "Device", "Kanal", "Label"])
           |> limit(n: 20)
@@ -409,7 +449,7 @@ app.get("/debug-mego3", async (req, res) => {
         const rows = await queryApi.collectRows(fluxQuery);
         res.json({ count: rows.length, rows });
     } catch (err) {
-        console.error("/debug-mego3 error:", err);
+        console.error("/debug-mego4 error:", err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -489,7 +529,11 @@ app.post("/config", async (req, res) => {
                 .timestamp(new Date());
             writeApi.writePoint(point);
 
-            channelConfig[ch] = { label: newLabel, schwellwert: newSchwell, hoechstwert: newHoe, updatedAt: Date.now() };
+            // ✅ rawLabel aligné sur le nouveau label : dès qu'un utilisateur
+            // renomme un canal ici, Node-RED taguera InfluxDB avec CE texte
+            // (envoyé tel quel au Messkoffer via setLabelToMesskoffer), donc
+            // les prochaines requêtes Flux doivent filtrer avec cette même valeur.
+            channelConfig[ch] = { label: newLabel, rawLabel: newLabel, schwellwert: newSchwell, hoechstwert: newHoe, updatedAt: Date.now() };
         }
         await writeApi.flush();
 
@@ -623,12 +667,12 @@ function computeApparentAndReactive(P, cosPhi) {
 }
 
 // ========== ROUTE DATA (Echtzeit) ==========
-// ✅ Source désormais : measurement "mego3", Device "mE180" (données Node-RED),
+// ✅ Source désormais : measurement "mego4", Device "mE180" (données Node-RED),
 // filtrées par Kanal=CHx ET Label=<label CGI actuel du canal>.
-// Spannung reste via /voltages (CGI Messkoffer). Energie reste via cache/CGI (jamais mego3).
+// Spannung reste via /voltages (CGI Messkoffer). Energie reste via cache/CGI (jamais mego4).
 
-const mego3_MEASUREMENT = "mego3";
-const mego3_DEVICE      = "mE180";
+const mego4_MEASUREMENT = "mego4";
+const mego4_DEVICE      = "mE180";
 
 app.get("/data", async (req, res) => {
     try {
@@ -661,13 +705,15 @@ app.get("/data", async (req, res) => {
         // ✅ Une requête Flux par canal, car le filtre Label dépend du label CGI courant
         // de chaque canal (peut différer d'un canal à l'autre).
         const queries = channelsList.map(ch => {
-            const label = channelConfig[ch]?.label || ch;
+            // ✅ rawLabel (brut, non décodé) pour matcher le tag InfluxDB écrit
+            // par Node-RED — le label décodé (affichage) ne matcherait rien.
+            const label = channelConfig[ch]?.rawLabel || channelConfig[ch]?.label || ch;
             const safeLabel = label.replace(/"/g, '\\"');
             return `
                 from(bucket: "${INFLUX_BUCKET}")
                   |> range(start: -10m)
-                  |> filter(fn: (r) => r._measurement == "${mego3_MEASUREMENT}")
-                  |> filter(fn: (r) => r.Device == "${mego3_DEVICE}")
+                  |> filter(fn: (r) => r._measurement == "${mego4_MEASUREMENT}")
+                  |> filter(fn: (r) => r.Device == "${mego4_DEVICE}")
                   |> filter(fn: (r) => r.Kanal  == "${ch}")
                   |> filter(fn: (r) => r.Label  == "${safeLabel}")
                   |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor")
@@ -705,9 +751,17 @@ app.get("/data", async (req, res) => {
             const voltKanal = idx < 6 ? 1 : (idx < 12 ? 2 : 3);
             const U = voltagesU[voltKanal] ?? null;
             const influxData = byChannel[ch] || {};
-            const I = influxData.Strom        ?? null;
-            const P = influxData.Wirkleistung ?? null;
+            let I = influxData.Strom        ?? null;
+            let P = influxData.Wirkleistung ?? null;
             const cosPhi = influxData.CosinusPhi ?? null;
+
+            // ✅ Facteur d'échelle x10 pour les canaux 5/6 de chaque phase
+            // (voir CHANNELS_SCALE_X10). CosinusPhi et Spannung ne sont jamais
+            // multipliés ; Scheinleistung/Blindleistung hériteront du x10 via P.
+            if (CHANNELS_SCALE_X10.has(ch)) {
+                if (I !== null) I *= 10;
+                if (P !== null) P *= 10;
+            }
 
             result[ch] = {
                 Label:        channelConfig[ch]?.label || ch,
@@ -715,7 +769,7 @@ app.get("/data", async (req, res) => {
                 Wirkleistung: P,
                 Spannung:     U,
                 CosinusPhi:   cosPhi,
-                // ✅ Energie : Messkoffer en priorité, cache local ensuite — jamais depuis mego3
+                // ✅ Energie : Messkoffer en priorité, cache local ensuite — jamais depuis mego4
                 Energie_temp: (messeEnergy[ch] && messeEnergy[ch] > 0)
                     ? messeEnergy[ch]
                     : (energyConfig[ch]?.temporary && energyConfig[ch].temporary > 0)
@@ -723,7 +777,8 @@ app.get("/data", async (req, res) => {
                     : null
             };
 
-            // ✅ Scheinleistung / Blindleistung calculées via Wirkleistung et CosinusPhi
+            // ✅ Scheinleistung / Blindleistung calculées via Wirkleistung (déjà
+            // mis à l'échelle ci-dessus) et CosinusPhi
             const { S, Q } = computeApparentAndReactive(P, cosPhi);
             result[ch].Scheinleistung = S;
             result[ch].Blindleistung  = Q;
@@ -737,7 +792,7 @@ app.get("/data", async (req, res) => {
 });
 
 // ========== ROUTE HISTORY ==========
-// ✅ Source désormais : measurement "mego3", Device "mE180", filtré par Kanal=CHx
+// ✅ Source désormais : measurement "mego4", Device "mE180", filtré par Kanal=CHx
 // et Label=<label CGI actuel du canal>.
 // ✅ CORRECTION : le champ "Energie" a été ajouté au filtre _field et à l'extraction
 // pointsByTime. Auparavant seuls Strom/Wirkleistung/Leistungsfaktor étaient demandés,
@@ -758,14 +813,16 @@ app.get("/history/:channel", async (req, res) => {
     let duration = req.query.time || "1h";
     if (duration.includes("d") && parseInt(duration) > 1) duration = "24h";
 
-    const label = channelConfig[ch]?.label || ch;
+    // ✅ rawLabel (brut, non décodé) pour matcher le tag InfluxDB écrit par
+    // Node-RED — même correctif que dans /data (voir plus haut).
+    const label = channelConfig[ch]?.rawLabel || channelConfig[ch]?.label || ch;
     const safeLabel = label.replace(/"/g, '\\"');
 
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
           |> range(start: -${duration})
-          |> filter(fn: (r) => r._measurement == "${mego3_MEASUREMENT}")
-          |> filter(fn: (r) => r.Device == "${mego3_DEVICE}")
+          |> filter(fn: (r) => r._measurement == "${mego4_MEASUREMENT}")
+          |> filter(fn: (r) => r.Device == "${mego4_DEVICE}")
           |> filter(fn: (r) => r.Kanal  == "${ch}")
           |> filter(fn: (r) => r.Label  == "${safeLabel}")
           |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor" or r._field == "Energie")
@@ -784,10 +841,17 @@ app.get("/history/:channel", async (req, res) => {
             else if (row._field === "Leistungsfaktor") pointsByTime[t].CosinusPhi  = row._value;
             else if (row._field === "Energie")        pointsByTime[t].Energie      = row._value;
         });
+        // ✅ Facteur d'échelle x10 pour les canaux 5/6 de chaque phase (voir
+        // CHANNELS_SCALE_X10) — appliqué sur Strom/Wirkleistung avant le calcul
+        // de Scheinleistung/Blindleistung, qui en hériteront automatiquement.
+        // CosinusPhi et Energie ne sont jamais multipliés.
+        const scaleThisChannel = CHANNELS_SCALE_X10.has(ch);
         const data = Object.values(pointsByTime)
             .map(point => {
-                const { S, Q } = computeApparentAndReactive(point.Wirkleistung ?? null, point.CosinusPhi ?? null);
-                return { ...point, Scheinleistung: S, Blindleistung: Q };
+                const strom        = scaleThisChannel && point.Strom        !== undefined ? point.Strom        * 10 : point.Strom;
+                const wirkleistung = scaleThisChannel && point.Wirkleistung !== undefined ? point.Wirkleistung * 10 : point.Wirkleistung;
+                const { S, Q } = computeApparentAndReactive(wirkleistung ?? null, point.CosinusPhi ?? null);
+                return { ...point, Strom: strom, Wirkleistung: wirkleistung, Scheinleistung: S, Blindleistung: Q };
             })
             .sort((a, b) => new Date(a.time) - new Date(b.time));
         res.json({ channel: ch, data });
