@@ -65,6 +65,56 @@ function applyX10IfNeeded(ch, value) {
     return CHANNELS_X10.includes(ch) ? value * 10 : value;
 }
 
+// ========== ENCODAGE MESSKOFFER (Latin1 / Windows-1252) ==========
+// ✅ Le Messkoffer encode ses champs texte (labels) en Windows-1252/Latin1
+// (1 octet par caractère), PAS en UTF-8. decodeURIComponent() attend de l'UTF-8
+// et échoue sur un octet seul comme %FC (ü), %E4 (ä), %F6 (ö) -> l'exception est
+// catchée et la chaîne brute "%fc" est renvoyée telle quelle au lieu de "ü".
+// On décode donc manuellement chaque %XX comme un octet Latin1.
+function decodeMesskofferText(raw) {
+    if (typeof raw !== "string") return raw;
+    try {
+        const bytes = [];
+        let i = 0;
+        while (i < raw.length) {
+            if (raw[i] === "%" && i + 2 < raw.length) {
+                bytes.push(parseInt(raw.substr(i + 1, 2), 16));
+                i += 3;
+            } else if (raw[i] === "+") {
+                bytes.push(0x20); // '+' = espace en form-urlencoded
+                i++;
+            } else {
+                bytes.push(raw.charCodeAt(i));
+                i++;
+            }
+        }
+        return Buffer.from(bytes).toString("latin1");
+    } catch {
+        return raw;
+    }
+}
+
+// ✅ Fonction inverse : encoder un label (pouvant contenir ü/ä/ö) au format
+// attendu par le Messkoffer (Latin1/Windows-1252) avant de le lui envoyer.
+// Sans ça, encodeURIComponent() produirait de l'UTF-8 multi-octets que
+// l'appareil ne saurait pas réinterpréter correctement.
+function encodeMesskofferText(str) {
+    if (typeof str !== "string") return "";
+    let result = "";
+    for (const ch of str) {
+        const code = ch.codePointAt(0);
+        if (/[A-Za-z0-9\-_.~]/.test(ch)) {
+            result += ch;
+        } else if (code <= 0xFF) {
+            result += "%" + code.toString(16).padStart(2, "0").toUpperCase();
+        } else {
+            // Caractère hors Latin1 (ex: emoji) : fallback UTF-8 standard
+            result += encodeURIComponent(ch);
+        }
+    }
+    return result;
+}
+
 // ========== MAPPING CH -> Device+Kanal ==========
 let channelMapping = {};
 
@@ -111,11 +161,10 @@ async function getLabelsFromMesskoffer() {
         console.log(`[Messkoffer] GET labels: ${url}`);
         const res  = await axios.get(url, { timeout: 5000 });
         const raw  = res.data;
+        // ✅ CORRECTION ENCODAGE : décodage Latin1/Windows-1252 (voir decodeMesskofferText)
+        // au lieu de decodeURIComponent (UTF-8) qui échouait sur ü/ä/ö.
         const parts = typeof raw === "string"
-            ? raw.split(";").map(v => {
-                try { return decodeURIComponent(v.replace(/\+/g, " ")); }
-                catch { return v; }
-              })
+            ? raw.split(";").map(v => decodeMesskofferText(v))
             : [];
         const result = {};
         for (let i = 0; i < 18; i++) {
@@ -167,7 +216,10 @@ async function getThresholdFromMesskoffer() {
 
 async function setLabelToMesskoffer(channelNum, label) {
     const idx = channelNum - 1;
-    const url = `http://${MESSE_IP}/set_sensor_config.cgi?id=${MESSE_ID}&sensor=ch&label${idx}=${encodeURIComponent(label)}`;
+    // ✅ CORRECTION ENCODAGE : encodeMesskofferText (Latin1/Windows-1252) au lieu
+    // de encodeURIComponent (UTF-8), pour que ü/ä/ö soient envoyés dans le format
+    // que le Messkoffer attend et sache réinterpréter correctement.
+    const url = `http://${MESSE_IP}/set_sensor_config.cgi?id=${MESSE_ID}&sensor=ch&label${idx}=${encodeMesskofferText(label)}`;
     try {
         await axios.get(url, { timeout: 3000 });
         return true;
