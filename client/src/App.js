@@ -44,7 +44,7 @@ import {
 } from "recharts";
 
 const API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:4000`;
-const STARTSEITE_URL = "http://192.168.1.20:8080";
+const STARTSEITE_URL = "http://192.168.1.21:8080";
 const PRIMARY_COLOR = "#7cbbcd";
 
 const formatChannelName  = (ch) => ch;
@@ -1436,7 +1436,7 @@ function App() {
   const shouldShowTrendChannel = ch  => trendSelectedChannels.length === 0 || trendSelectedChannels.includes(ch);
   const shouldShowTrendMetric  = key => trendSelectedMetrics.length === 0  || trendSelectedMetrics.includes(key);
 
-  const grafanaUrl = "http://192.168.1.20:3000/d/adkdpz6/energie?orgId=1&from=now-15m&to=now&timezone=browser&var-Kanal=CH1%20a&refresh=5s";
+  const grafanaUrl = "http://192.168.1.21:3000/d/adkdpz6/energie?orgId=1&from=now-15m&to=now&timezone=browser&var-Kanal=CH1%20a&refresh=5s";
 
   // ── NavBar ──
   const NavBar = () => (
