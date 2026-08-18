@@ -34,14 +34,36 @@ if (!MESSE_IP || !MESSE_ID) {
     process.exit(1);
 }
 
-const channelsList = Array.from({ length: 18 }, (_, i) => `CH${i + 1}`);
+// ✅ Nommage aligné sur le flow Node-RED (mE180) : 18 canaux physiques
+// nommés "CH1 a".."CH1 f" (phase L1), "CH2 g".."CH2 l" (phase L2),
+// "CH3 m".."CH3 r" (phase L3) — au lieu de l'ancien "CH1".."CH18".
+// L'ordre positionnel est identique à avant (index 0 = premier canal, etc.),
+// donc toute la logique basée sur la position dans ce tableau reste valable.
+const channelsList = [
+    "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
+    "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
+    "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
+];
+
+// ✅ Le nom de canal n'est plus "parsable" directement (ex: "CH1 a" n'est pas
+// un simple CH+numéro) : on retrouve le numéro physique 1-18 par sa position
+// dans channelsList, plutôt que par découpage de chaîne (ancien
+// `parseInt(ch.substring(2), 10)`, qui ne fonctionne plus de façon fiable).
+function channelNumber(ch) {
+    const idx = channelsList.indexOf(ch);
+    return idx === -1 ? NaN : idx + 1;
+}
 
 // ========== MAPPING CH -> Device+Kanal ==========
 let channelMapping = {};
 
 function initMapping() {
     for (let i = 0; i < 18; i++) {
-        const ch       = `CH${i + 1}`;
+        // ✅ CORRIGÉ : clé = channelsList[i] (nouveau nommage) au lieu de
+        // l'ancien "CH${i+1}" — sinon channelNumber(ch) (utilisé pour la
+        // corrélation CosPhi dans discoverSensors) ne retrouvait plus la
+        // position du canal et cassait le Cosinus Phi de l'onglet Mapping.
+        const ch       = channelsList[i];
         const sensor   = Math.floor(i / 4) + 1;
         const kanalIdx = i % 4;
         const kanals   = ["1", "2", "3", "4"];
@@ -58,7 +80,11 @@ initMapping();
 let channelConfig = {};
 
 function getDefaultHoechstwert(ch) {
-    return ch === "CH1" || ch === "CH7" || ch === "CH13" ? 64 : 32;
+    // ✅ Avant : comparait le nom exact ("CH1"/"CH7"/"CH13"). Avec le nouveau
+    // nommage ("CH1 a", "CH2 g", "CH3 m"...), on se base sur la position
+    // (1er canal de chaque groupe de 6 = phase L1/L2/L3) via channelNumber().
+    const num = channelNumber(ch);
+    return num === 1 || num === 7 || num === 13 ? 64 : 32;
 }
 
 function initConfig() {
@@ -100,7 +126,12 @@ async function getLabelsFromMesskoffer() {
             : [];
         const result = {};
         for (let i = 0; i < 18; i++) {
-            result[`CH${i + 1}`] = (parts[i] !== undefined && parts[i] !== "") ? parts[i] : `CH${i + 1}`;
+            // ✅ CORRIGÉ : clé = nom réel du canal (channelsList[i], ex "CH1 a")
+            // au lieu de l'ancien "CH${i+1}" — sinon channelConfig[ch] ne
+            // retrouvait jamais ce label (clé introuvable) et retombait sur
+            // le nom du canal lui-même comme "Bezeichnung".
+            const ch = channelsList[i];
+            result[ch] = (parts[i] !== undefined && parts[i] !== "") ? parts[i] : ch;
         }
         return result;
     } catch (err) {
@@ -117,7 +148,7 @@ async function getScaleendFromMesskoffer() {
         const result = {};
         for (let i = 0; i < 18; i++) {
             const val = parseFloat(parts[i]);
-            result[`CH${i + 1}`] = !isNaN(val) ? val : 32;
+            result[channelsList[i]] = !isNaN(val) ? val : 32;
         }
         return result;
     } catch (err) {
@@ -134,7 +165,7 @@ async function getThresholdFromMesskoffer() {
         const result = {};
         for (let i = 0; i < 18; i++) {
             const val = parseFloat(parts[i]);
-            result[`CH${i + 1}`] = !isNaN(val) ? val / 1000 : 0;
+            result[channelsList[i]] = !isNaN(val) ? val / 1000 : 0;
         }
         return result;
     } catch (err) {
@@ -190,7 +221,10 @@ async function getEnergiesFromMesskoffer() {
         if (typeof raw === "string") {
             const values = raw.split(";").map(v => parseFloat(v));
             for (let i = 0; i < 18; i++) {
-                temporary[`CH${i + 1}`] = (values[19 + i] || 0) / 10000;
+                // ✅ CORRIGÉ : clé = channelsList[i] (nouveau nommage), sinon
+                // "Kanal Zähler" et l'historique d'énergie (writeEnergyHistoryPoints)
+                // ne retrouvaient plus aucune valeur (clé introuvable).
+                temporary[channelsList[i]] = (values[19 + i] || 0) / 10000;
             }
         }
         return { temporary };
@@ -279,8 +313,6 @@ app.post("/kundendaten-labels", (req, res) => {
 });
 
 // ========== CALCUL SCHEINLEISTUNG / BLINDLEISTUNG via P et cosφ ==========
-// ✅ Déplacé plus haut (avant discoverSensors) pour être utilisé aussi dans
-// la découverte Kundendaten/Mapping, en plus de la route /data.
 function computeApparentAndReactive(P, cosPhi) {
     if (P === null || P === undefined || isNaN(P)) return { S: null, Q: null };
     if (cosPhi === null || cosPhi === undefined || isNaN(cosPhi) || Math.abs(cosPhi) < 0.01) {
@@ -292,19 +324,6 @@ function computeApparentAndReactive(P, cosPhi) {
 }
 
 // ========== DECOUVERTE DYNAMIQUE SENSOR/KANAL (FONCTION PARTAGEE) ==========
-// ✅ Factorisation : la logique de découverte (groupement Device -> Kanal ->
-// dernières valeurs) est commune entre "historique complet" (/sensors-discovery,
-// range depuis toujours) et "connecté maintenant" (/sensors-connected, range
-// récent). On la met dans une fonction paramétrée par la borne de temps Flux
-// (ex: "0" pour tout l'historique, "-2m" pour les 2 dernières minutes),
-// pour ne pas dupliquer le code et rester cohérent si la logique évolue.
-//
-// ✅ CORRIGÉ (d'après le flux Node-RED "Volt1000S") : une seule measurement,
-// "sensoren", contient Strom / Wirkleistung / Spannung / Energie / CosPhi.
-// Le champ Cosinus Phi s'appelle "CosPhi" (pas "Leistungsfaktor") et est
-// écrit À PART, sous Device="Sensor0" avec Kanal = numéro de CANAL GLOBAL
-// (1-18, = CH1-CH18), pas le Kanal réel (1-4) du Sensor physique. On corrèle
-// donc ce CosPhi vers le bon Device/Kanal via channelMapping (CH -> {device, kanal}).
 
 function findChannelForDeviceKanal(device, kanal) {
     for (const [ch, map] of Object.entries(channelMapping)) {
@@ -314,9 +333,18 @@ function findChannelForDeviceKanal(device, kanal) {
 }
 
 async function discoverSensors(rangeStart) {
+    // ✅ CORRECTIF : un "0" nu comme borne "start" peut faire échouer la
+    // compilation Flux selon la version d'InfluxDB ("int is not assignable
+    // to type time"). On le convertit explicitement en horodatage absolu
+    // RFC3339, qui est accepté par toutes les versions de Flux, tout en
+    // laissant passer tel quel les bornes relatives déjà valides (ex: "-2m").
+    const start = (rangeStart === "0" || rangeStart === 0)
+        ? "1970-01-01T00:00:00Z"
+        : rangeStart;
+
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
-          |> range(start: ${rangeStart})
+          |> range(start: ${start})
           |> filter(fn: (r) => r["_measurement"] == "sensoren")
           |> filter(fn: (r) => r["_field"] == "Strom" or r["_field"] == "Wirkleistung" or r["_field"] == "Spannung" or r["_field"] == "Energie" or r["_field"] == "CosPhi")
           |> last()
@@ -326,8 +354,6 @@ async function discoverSensors(rangeStart) {
 
     // Regrouper par Device -> Kanal -> { Strom, Wirkleistung, Spannung, Energie, CosinusPhi, time }
     const bySensor = {};
-    // ✅ CosPhi brut, indexé par numéro de canal GLOBAL (1-18, tel qu'écrit par
-    // Node-RED sous Device="Sensor0"), à corréler ensuite via channelMapping.
     const cosPhiByGlobalChannel = {};
 
     rows.forEach(row => {
@@ -337,8 +363,6 @@ async function discoverSensors(rangeStart) {
 
         if (!device) return;
 
-        // ✅ CosPhi (Device="Sensor0", Kanal=canal global 1-18) : stocké à part,
-        // ne crée PAS d'entrée bySensor["Sensor0"] pour ce champ.
         if (device === "Sensor0" && field === "CosPhi") {
             cosPhiByGlobalChannel[kanal] = row._value;
             return;
@@ -360,20 +384,17 @@ async function discoverSensors(rangeStart) {
         }
     });
 
-    // ✅ Corrélation CosPhi : pour chaque Device/Kanal réel découvert, on retrouve
-    // le CH correspondant (via channelMapping) puis le CosPhi de ce canal global.
     for (const device of Object.keys(bySensor)) {
         for (const kanal of Object.keys(bySensor[device])) {
             const ch = findChannelForDeviceKanal(device, kanal);
             if (!ch) continue;
-            const chNum = String(parseInt(ch.substring(2), 10));
+            const chNum = String(channelNumber(ch));
             if (cosPhiByGlobalChannel[chNum] !== undefined) {
                 bySensor[device][kanal].CosinusPhi = cosPhiByGlobalChannel[chNum];
             }
         }
     }
 
-    // Trier : "Netz"/"Sensor0" (tension) en premier, puis Sensor1, Sensor2, ...
     const sensorNames = Object.keys(bySensor).sort((a, b) => {
         const rank = (name) => {
             if (name === "Netz" || name === "Sensor0") return -1;
@@ -387,8 +408,6 @@ async function discoverSensors(rangeStart) {
         const kanaux = Object.values(bySensor[device])
             .sort((a, b) => parseInt(a.kanal, 10) - parseInt(b.kanal, 10))
             .map(k => {
-                // ✅ Blindleistung (var) et Scheinleistung (VA) calculées à partir de
-                // Wirkleistung (P) et Cosinus Phi, comme pour Live Daten.
                 const { S, Q } = computeApparentAndReactive(k.Wirkleistung, k.CosinusPhi);
                 return {
                     ...k,
@@ -402,8 +421,6 @@ async function discoverSensors(rangeStart) {
 }
 
 // ========== ROUTE HISTORIQUE COMPLET (onglet Mapping) ==========
-// Tous les Device/Kanal ayant EU AU MOINS UNE FOIS des données (depuis toujours).
-// C'est la vue "historique" existante, inchangée.
 
 app.get("/sensors-discovery", async (req, res) => {
     try {
@@ -416,21 +433,6 @@ app.get("/sensors-discovery", async (req, res) => {
 });
 
 // ========== ROUTE "CAPTEURS RÉELLEMENT CONNECTÉS" (via Node-RED) ==========
-// ✅ MODIFIÉ : l'ancienne heuristique basée sur une fenêtre de temps InfluxDB
-// (ex: "actif dans les 10 dernières secondes") ne fonctionne pas de façon fiable,
-// car le flux Node-RED Volt1000S interroge et écrit EN CONTINU tous les canaux
-// configurés (Sensor1, Sensor2, ...), qu'un capteur soit physiquement branché ou
-// non — un canal "configuré mais débranché" apparaît donc quand même comme actif.
-//
-// La vraie source de vérité est le registre Modbus Sensoranzahl du Volt1000S
-// lui-même, qui reflète le nombre RÉEL de capteurs physiquement branchés. Ce
-// registre est lu en continu par Node-RED (global.set('Sensoranzahl', ...)) et
-// désormais exposé via un endpoint HTTP : GET /sensoranzahl sur Node-RED.
-//
-// Ici, on interroge Node-RED en direct à chaque appel (pas de cache), on
-// récupère ce nombre réel N, puis on ne garde que Sensor1...SensorN (Netz/
-// Sensor0 — la tension réseau — est toujours conservé, ce n'est pas un capteur
-// de courant).
 
 const NODERED_URL = process.env.NODERED_URL || "http://192.168.1.20:1880";
 
@@ -448,10 +450,6 @@ app.get("/sensors-connected", async (req, res) => {
     try {
         const anzahl = await getRealConnectedSensorCount();
 
-        // Historique complet (toutes les données InfluxDB jamais écrites), puis
-        // filtrage sur le nombre réel de capteurs branchés selon Node-RED.
-        // ✅ MODIFIÉ : "Netz"/"Sensor0" (tension réseau uniquement, pas un vrai
-        // capteur de courant) sont désormais exclus de cette vue.
         const allSensors = await discoverSensors("0");
         const result = allSensors.filter(s => {
             if (s.device === "Netz" || s.device === "Sensor0") return false;
@@ -461,11 +459,6 @@ app.get("/sensors-connected", async (req, res) => {
 
         res.json({ sensors: result, count: result.length, sensoranzahl: anzahl });
     } catch (err) {
-        // ✅ MODIFIÉ : err.message était vide dans certains cas (ex: erreur réseau
-        // sans message standard). On log l'erreur complète et on renvoie aussi le
-        // code d'erreur réseau (ECONNREFUSED, ENOTFOUND, ETIMEDOUT...) pour pouvoir
-        // diagnostiquer précisément (ex: Node-RED dans un autre conteneur Docker que
-        // le backend → "localhost" ne le joint pas).
         console.error("/sensors-connected error:", err);
         res.status(500).json({
             error: "Node-RED nicht erreichbar oder Sensoranzahl ungültig",
@@ -587,7 +580,7 @@ app.post("/config", async (req, res) => {
             const newLabel   = cfg.label       !== undefined ? cfg.label                   : old.label;
             const newSchwell = cfg.schwellwert  !== undefined ? parseFloat(cfg.schwellwert) : old.schwellwert;
             const newHoe     = cfg.hoechstwert  !== undefined ? parseFloat(cfg.hoechstwert) : old.hoechstwert;
-            const chNum      = parseInt(ch.substring(2), 10);
+            const chNum      = channelNumber(ch);
 
             if (cfg.label !== undefined && cfg.label !== old.label)
                 await setLabelToMesskoffer(chNum, newLabel);
@@ -596,13 +589,11 @@ app.post("/config", async (req, res) => {
             if (cfg.hoechstwert !== undefined && parseFloat(cfg.hoechstwert) !== old.hoechstwert)
                 await setScaleendToMesskoffer(chNum, newHoe);
 
-            const point = new Point("sensoren_config")
-                .tag("channel", ch)
-                .tag("label",   newLabel)
-                .floatField("schwellwert", newSchwell)
-                .floatField("hoechstwert", newHoe)
-                .timestamp(new Date());
-            writeApi.writePoint(point);
+            // ✅ SUPPRIMÉ : écriture InfluxDB dans "sensoren_config" — cette
+            // measurement n'était jamais relue nulle part (GET /config sert
+            // uniquement depuis la mémoire channelConfig, cf. ci-dessous) et
+            // n'est pas utilisée par le frontend. Ne plus l'écrire évite
+            // d'accumuler des données inutiles dans la base.
 
             channelConfig[ch] = { label: newLabel, schwellwert: newSchwell, hoechstwert: newHoe, updatedAt: Date.now() };
         }
@@ -657,7 +648,7 @@ app.post("/energy-values/set", async (req, res) => {
             const newTemp = cfg.temporary !== undefined ? parseFloat(cfg.temporary) : oldTemp;
             if (newTemp === oldTemp) continue;
 
-            const chNum = parseInt(ch.substring(2), 10);
+            const chNum = channelNumber(ch);
 
             await setEnergyToMesskoffer(chNum, newTemp);
 
@@ -748,16 +739,15 @@ app.get("/data", async (req, res) => {
             console.error("[/data] Fehler Spannungen:", err.message);
         }
 
+        // ✅ SUPPRIMÉ : filtre r.Label (même raison que /history — Device+Kanal
+        // suffit à identifier la série de façon unique et fiable).
         const queries = channelsList.map(ch => {
-            const label = channelConfig[ch]?.label || ch;
-            const safeLabel = label.replace(/"/g, '\\"');
             return `
                 from(bucket: "${INFLUX_BUCKET}")
                   |> range(start: -10m)
                   |> filter(fn: (r) => r._measurement == "${MEGO_MEASUREMENT}")
                   |> filter(fn: (r) => r.Device == "${MEGO_DEVICE}")
                   |> filter(fn: (r) => r.Kanal  == "${ch}")
-                  |> filter(fn: (r) => r.Label  == "${safeLabel}")
                   |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor")
                   |> last()
             `;
@@ -783,8 +773,10 @@ app.get("/data", async (req, res) => {
 
         const result = {};
         for (const ch of channelsList) {
-            const chNum     = parseInt(ch.substring(2), 10);
-            const voltKanal = chNum <= 3 ? chNum : 1;
+            const chNum     = channelNumber(ch);
+            // ✅ 18 canaux répartis en 3 groupes de 6 (comme le flow Node-RED) :
+            // canaux 1-6 → phase L1, 7-12 → L2, 13-18 → L3.
+            const voltKanal = Math.min(3, Math.ceil(chNum / 6));
             const U = voltagesU[voltKanal] ?? null;
             const influxData = byChannel[ch] || {};
             const I = influxData.Strom        ?? null;
@@ -820,7 +812,12 @@ app.get("/data", async (req, res) => {
 
 app.get("/history/:channel", async (req, res) => {
     const { channel } = req.params;
-    const ch = channel.toUpperCase();
+    // ✅ Le nouveau nommage ("CH1 a", "CH2 g"...) contient une lettre en
+    // minuscule qui fait partie du nom — un .toUpperCase() la transformait
+    // en majuscule et cassait la comparaison avec channelsList. On accepte
+    // désormais le canal tel quel (le frontend envoie déjà la bonne casse,
+    // puisqu'il réutilise les clés retournées par /config).
+    const ch = channel;
     if (!channelsList.includes(ch)) {
         return res.status(400).json({ error: "Ungültiger Kanal" });
     }
@@ -828,16 +825,18 @@ app.get("/history/:channel", async (req, res) => {
     let duration = req.query.time || "1h";
     if (duration.includes("d") && parseInt(duration) > 1) duration = "24h";
 
-    const label = channelConfig[ch]?.label || ch;
-    const safeLabel = label.replace(/"/g, '\\"');
-
+    // ✅ SUPPRIMÉ : le filtre supplémentaire sur r.Label a été retiré. Device
+    // + Kanal identifient déjà une série de façon unique — filtrer aussi sur
+    // le Label (texte libre, modifiable, sujet à des différences d'encodage
+    // entre le cache backend et ce que Node-RED écrit réellement) faisait
+    // disparaître silencieusement tout l'historique dès que les deux
+    // textes ne matchaient plus au caractère près.
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
           |> range(start: -${duration})
           |> filter(fn: (r) => r._measurement == "${MEGO_MEASUREMENT}")
           |> filter(fn: (r) => r.Device == "${MEGO_DEVICE}")
           |> filter(fn: (r) => r.Kanal  == "${ch}")
-          |> filter(fn: (r) => r.Label  == "${safeLabel}")
           |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor" or r._field == "Energie")
           |> aggregateWindow(every: 10s, fn: mean, createEmpty: false)
           |> sort(columns: ["_time"])
