@@ -265,7 +265,44 @@ async function initConfigFromMesskoffer() {
     }
     console.log("[Config] Aus Messkoffer geladen");
 }
-initConfigFromMesskoffer();
+
+// ✅ AJOUT : au démarrage (surtout après un reboot système), le réseau ou le
+// Messkoffer peuvent ne pas être encore disponibles quand ce conteneur
+// démarre. Un seul essai qui échoue figeait alors les labels par défaut
+// (nom du canal, ex "CH1 a") jusqu'à un redémarrage manuel plus tardif du
+// conteneur (réseau alors déjà up). On réessaie donc plusieurs fois avec un
+// délai, tant que le Messkoffer n'est pas joignable.
+async function initConfigFromMesskofferWithRetry(maxAttempts = 20, delayMs = 5000) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const labels = await getLabelsFromMesskoffer();
+        if (labels) {
+            // Labels récupérés avec succès : on charge la config complète normalement
+            await initConfigFromMesskoffer();
+            console.log(`[Config] Messkoffer erreichbar (Versuch ${attempt}/${maxAttempts})`);
+            return;
+        }
+        console.warn(`[Config] Messkoffer nicht erreichbar (Versuch ${attempt}/${maxAttempts}), erneuter Versuch in ${delayMs / 1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+    console.error(`[Config] Messkoffer nach ${maxAttempts} Versuchen nicht erreichbar. Standardwerte werden verwendet.`);
+    await initConfigFromMesskoffer(); // dernier essai, garde le fallback existant si toujours KO
+}
+
+initConfigFromMesskofferWithRetry();
+
+// ✅ AJOUT : les labels (et scaleend/threshold) peuvent être modifiés
+// directement sur le contrôleur Messkoffer, en dehors de l'interface web.
+// channelConfig est un cache mémoire qui ne se met à jour que quand CE
+// serveur écrit dessus (POST /config) — un changement fait directement sur
+// l'appareil n'était donc jamais détecté tant qu'on ne rappelait pas
+// manuellement /messkoffer/reload. On synchronise maintenant automatiquement
+// toutes les 15 secondes.
+const CONFIG_SYNC_INTERVAL_MS = 5000;
+setInterval(() => {
+    initConfigFromMesskoffer().catch(err =>
+        console.error("[Config] Fehler bei periodischer Synchronisierung:", err.message)
+    );
+}, CONFIG_SYNC_INTERVAL_MS);
 
 // ========== ENERGIE CACHE ==========
 let energyConfig = {};
@@ -312,7 +349,57 @@ app.post("/kundendaten-labels", (req, res) => {
     res.json({ success: true, device, kanal: String(kanal), label: kundenLabels[key] });
 });
 
-// ========== CALCUL SCHEINLEISTUNG / BLINDLEISTUNG via P et cosφ ==========
+// ========== RESET LOGICIEL DU COMPTEUR ENERGIE (Sensor1/Sensor2, mesure "sensoren") ==========
+// ✅ Le champ Energie vient d'un compteur cumulatif interne au Volt1000S,
+// jamais remis à zéro par le matériel lui-même. On simule un "reset" côté
+// logiciel : on mémorise la valeur brute actuelle comme "baseline" au moment
+// du clic, puis on la soustrait à chaque lecture suivante — comme un
+// compteur journalier affiché à côté du kilométrage total d'une voiture.
+// ⚠️ Cette baseline est en mémoire uniquement (perdue si le serveur redémarre),
+// comme kundenLabels ci-dessus.
+let energieResetOffsets = {};
+
+function getEnergieOffsetKey(device, kanal) {
+    return `${device}_${kanal}`;
+}
+
+app.get("/energie-reset", (req, res) => {
+    res.json(energieResetOffsets);
+});
+
+app.post("/energie-reset", async (req, res) => {
+    const { device, kanal } = req.body;
+    if (!device || kanal === undefined || kanal === null) {
+        return res.status(400).json({ error: "device und kanal erforderlich" });
+    }
+    try {
+        const fluxQuery = `
+            from(bucket: "${INFLUX_BUCKET}")
+              |> range(start: 0)
+              |> filter(fn: (r) => r._measurement == "sensoren")
+              |> filter(fn: (r) => r.Device == "${device}")
+              |> filter(fn: (r) => r.Kanal  == "${String(kanal)}")
+              |> filter(fn: (r) => r._field == "Energie")
+              |> last()
+        `;
+        const rows     = await queryApi.collectRows(fluxQuery);
+        const rawValue = rows[0]?._value ?? 0;
+        const key      = getEnergieOffsetKey(device, String(kanal));
+        energieResetOffsets[key] = rawValue;
+        console.log(`[Energie-Reset] ${key}: Baseline gesetzt auf ${rawValue} Wh`);
+        res.json({ success: true, device, kanal: String(kanal), baseline: rawValue });
+    } catch (err) {
+        console.error("[POST /energie-reset] Fehler:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+// ========== CALCUL SCHEINLEISTUNG / BLINDLEISTUNG via P et cosφ (Messkoffer/mego) ==========
+// ✅ Conservé tel quel : utilisé par la route /data (système Messkoffer, mego),
+// qui reçoit un CosinusPhi ("Leistungsfaktor") déjà mesuré en direct par ce
+// système-là. Ne pas confondre avec le système Sensor1/Sensor2/Netz
+// (mesure "sensoren") ci-dessous, qui a sa propre fonction de calcul.
 function computeApparentAndReactive(P, cosPhi) {
     if (P === null || P === undefined || isNaN(P)) return { S: null, Q: null };
     if (cosPhi === null || cosPhi === undefined || isNaN(cosPhi) || Math.abs(cosPhi) < 0.01) {
@@ -321,6 +408,27 @@ function computeApparentAndReactive(P, cosPhi) {
     const S = P / cosPhi;
     const Q = Math.sqrt(Math.max(0, S * S - P * P));
     return { S, Q };
+}
+
+// ✅ NOUVEAU : calcul de la puissance apparente/réactive directement à partir
+// de U (Spannung) et I (Strom), tous deux mesurés toutes les 5 secondes —
+// au lieu d'attendre le Cosinus Phi, qui n'est récupéré qu'une fois par heure
+// via la CGI (get_live_values.cgi). Formule du triangle de puissance :
+//   S (VA)  = U × I
+//   Q (var) = √(S² − P²)
+//   cosφ    = P / S
+// Utilisé pour le système Sensor1/Sensor2 (onglet Mapping/Sensor-Bezeichnung).
+function computeApparentAndReactiveFromUI(U, I, P) {
+    if (U === null || U === undefined || isNaN(U) || I === null || I === undefined || isNaN(I)) {
+        return { S: null, Q: null, cosPhi: null };
+    }
+    const S = U * I;
+    if (P === null || P === undefined || isNaN(P) || S === 0) {
+        return { S, Q: null, cosPhi: null };
+    }
+    const Q = Math.sqrt(Math.max(0, S * S - P * P));
+    const cosPhi = P / S;
+    return { S, Q, cosPhi };
 }
 
 // ========== DECOUVERTE DYNAMIQUE SENSOR/KANAL (FONCTION PARTAGEE) ==========
@@ -335,11 +443,12 @@ function findChannelForDeviceKanal(device, kanal) {
 async function discoverSensors(rangeStart) {
     // ✅ CORRECTIF : un "0" nu comme borne "start" peut faire échouer la
     // compilation Flux selon la version d'InfluxDB ("int is not assignable
-    // to type time"). On le convertit explicitement en horodatage absolu
-    // RFC3339, qui est accepté par toutes les versions de Flux, tout en
-    // laissant passer tel quel les bornes relatives déjà valides (ex: "-2m").
+    // to type time"). On le convertit en une fenêtre bornée (30 jours) plutôt
+    // qu'un horodatage absolu depuis 1970 — largement suffisant pour lister
+    // tout capteur ayant déjà émis récemment, tout en gardant la requête
+    // légère même appelée toutes les secondes (polling live des cartes).
     const start = (rangeStart === "0" || rangeStart === 0)
-        ? "1970-01-01T00:00:00Z"
+        ? "-30d"
         : rangeStart;
 
     const fluxQuery = `
@@ -384,6 +493,8 @@ async function discoverSensors(rangeStart) {
         }
     });
 
+    // ✅ Fallback : CosPhi horaire (CGI), utilisé seulement si U×I n'est pas
+    // calculable (tension manquante, ex: Kanal 4 / Neutre).
     for (const device of Object.keys(bySensor)) {
         for (const kanal of Object.keys(bySensor[device])) {
             const ch = findChannelForDeviceKanal(device, kanal);
@@ -404,16 +515,41 @@ async function discoverSensors(rangeStart) {
         return rank(a) - rank(b);
     });
 
+    // ✅ Tensions de phase (Sensor0/Netz, Kanal 1/2/3 = L1/L2/L3) — servent à
+    // calculer S et Q en direct pour Sensor1/Sensor2/etc., toutes les 5s,
+    // sans dépendre du CosPhi horaire (CGI). Le Kanal "4" (Neutre) n'a pas
+    // de tension de phase propre : Blindleistung/Scheinleistung y resteront
+    // null (comportement attendu).
+    const netzDevice = bySensor["Netz"] || bySensor["Sensor0"] || {};
+    const netzVoltageByKanal = {
+        "1": netzDevice["1"]?.Spannung ?? null,
+        "2": netzDevice["2"]?.Spannung ?? null,
+        "3": netzDevice["3"]?.Spannung ?? null,
+    };
+
     return sensorNames.map(device => {
         const kanaux = Object.values(bySensor[device])
             .sort((a, b) => parseInt(a.kanal, 10) - parseInt(b.kanal, 10))
             .map(k => {
-                const { S, Q } = computeApparentAndReactive(k.Wirkleistung, k.CosinusPhi);
+                const U = netzVoltageByKanal[k.kanal] ?? null;
+                const { S, Q, cosPhi } = computeApparentAndReactiveFromUI(U, k.Strom, k.Wirkleistung);
+                // ✅ Applique le reset logiciel (soustrait la baseline mémorisée
+                // au dernier clic sur "Zähler zurücksetzen"), le cas échéant.
+                // Ne modifie que l'affichage — le compteur matériel réel du
+                // Volt1000S continue de tourner en arrière-plan sans interruption.
+                const offset = energieResetOffsets[getEnergieOffsetKey(device, k.kanal)] || 0;
+                const adjustedEnergie = (k.Energie !== null && k.Energie !== undefined && !isNaN(k.Energie))
+                    ? Math.max(0, k.Energie - offset)
+                    : k.Energie;
                 return {
                     ...k,
+                    Energie:        adjustedEnergie,
                     Bezeichnung:    getKundenLabel(device, k.kanal),
                     Scheinleistung: S,
-                    Blindleistung:  Q
+                    Blindleistung:  Q,
+                    // Priorité au cosφ calculé en direct (U×I) ; sinon
+                    // fallback sur l'ancien CosPhi horaire (CGI).
+                    CosinusPhi:     cosPhi !== null ? cosPhi : k.CosinusPhi
                 };
             });
         return { device, kanaele: kanaux };
@@ -469,6 +605,24 @@ app.get("/sensors-connected", async (req, res) => {
     }
 });
 
+// ✅ AJOUT : au lieu d'une fenêtre d'agrégation fixe (10s) quelle que soit la
+// durée demandée, on adapte la taille de fenêtre à la plage sélectionnée —
+// comme le fait Grafana avec v.windowPeriod. Une fenêtre fixe trop grande par
+// rapport à la durée choisie renvoie trop peu de points, ce qui donne une
+// courbe qui ressemble à des points isolés plutôt qu'à une ligne continue.
+function getAggregationWindow(duration) {
+    const map = {
+        "5m":  "2s",
+        "10m": "5s",
+        "15m": "5s",
+        "1h":  "15s",
+        "2h":  "30s",
+        "6h":  "1m",
+        "24h": "5m"
+    };
+    return map[duration] || "10s";
+}
+
 // ========== ROUTE HISTORIQUE DIRECT PAR SENSOR/KANAL (pour onglet Mapping) ==========
 
 app.get("/sensor-history/:device/:kanal", async (req, res) => {
@@ -489,14 +643,25 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
           |> filter(fn: (r) => r.Device == "${device}")
           |> filter(fn: (r) => r.Kanal  == "${kanal}")
           |> filter(fn: (r) => r._field == "${metric}")
-          |> aggregateWindow(every: 10s, fn: mean, createEmpty: false)
+          |> aggregateWindow(every: ${getAggregationWindow(duration)}, fn: mean, createEmpty: false)
           |> sort(columns: ["_time"])
     `;
 
     try {
         const rows = await queryApi.collectRows(fluxQuery);
+        // ✅ Applique le même reset logiciel que /sensors-discovery : sans ça,
+        // la vue détail (résumé + graphique) réaffichait la valeur brute
+        // cumulée depuis toujours, même après un clic sur "zurücksetzen".
+        const offset = (metric === "Energie")
+            ? (energieResetOffsets[getEnergieOffsetKey(device, kanal)] || 0)
+            : 0;
         const data = rows
-            .map(row => ({ time: row._time, [metric]: row._value }))
+            .map(row => {
+                const value = (metric === "Energie" && row._value !== null && row._value !== undefined)
+                    ? Math.max(0, row._value - offset)
+                    : row._value;
+                return { time: row._time, [metric]: value };
+            })
             .sort((a, b) => new Date(a.time) - new Date(b.time));
         res.json({ device, kanal, metric, data });
     } catch (error) {
@@ -838,7 +1003,7 @@ app.get("/history/:channel", async (req, res) => {
           |> filter(fn: (r) => r.Device == "${MEGO_DEVICE}")
           |> filter(fn: (r) => r.Kanal  == "${ch}")
           |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor" or r._field == "Energie")
-          |> aggregateWindow(every: 10s, fn: mean, createEmpty: false)
+          |> aggregateWindow(every: ${getAggregationWindow(duration)}, fn: mean, createEmpty: false)
           |> sort(columns: ["_time"])
     `;
 

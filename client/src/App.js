@@ -9,7 +9,8 @@ import { ThemeProvider, createTheme } from "@mui/material/styles";
 import {
   Paper, Typography, Box, Button, Divider,
   MenuItem, Checkbox, ListItemText, TextField, Alert,
-  useMediaQuery, Drawer, Badge, Popover, FormControlLabel, Menu, Chip
+  useMediaQuery, Drawer, Badge, Popover, FormControlLabel, Menu, Chip, IconButton,
+  Dialog, DialogTitle, DialogContent, DialogActions
 } from "@mui/material";
 import TrendingUpIcon from "@mui/icons-material/TrendingUp";
 import DashboardIcon from "@mui/icons-material/Dashboard";
@@ -31,6 +32,7 @@ import FilterListIcon from "@mui/icons-material/FilterList";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import UpdateIcon from "@mui/icons-material/Update";
 import SyncIcon from "@mui/icons-material/Sync";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, Legend, CartesianGrid, ResponsiveContainer
 } from "recharts";
@@ -129,11 +131,17 @@ const ChannelLabel = ({ channel, letterColor = BRAND }) => {
   );
 };
 
+// ✅ MODIFIÉ : Cosinus Phi retiré de l'affichage (l'utilisateur ne veut plus
+// le voir dans les boxes). Le calcul backend (Blindleistung/Scheinleistung)
+// n'est pas affecté, seul l'affichage frontend est concerné.
+// ✅ METRIC_LABELS alimente uniquement le sélecteur de la vue détaillée
+// "Trends" (graphique historique par canal CH1-CH18) — Cosinus Phi y reste
+// absent volontairement. Les cartes Live Daten utilisent METRIC_OPTIONS
+// (ci-dessous), qui inclut bien Cosinus Phi.
 const METRIC_LABELS = {
   Strom:        "Strom (A)",
   Wirkleistung: "Wirkleistung (W)",
   Spannung:     "Spannung (V)",
-  CosinusPhi:   "Cosinus Phi",
   Energie_temp: "Energie (kWh)",
 };
 
@@ -937,10 +945,15 @@ const EnergyManager = () => {
   );
 };
 
-// ─── MAPPING METRIC OPTIONS (Strom / Wirkleistung / Spannung / Energie / Cosinus Phi / Blindleistung / Scheinleistung) ────────────────
-// ✅ Étendu aux 6 mesures de "Live Daten" (comme Kundendaten) — utilisé pour les
-// cartes Sensor et le résumé du détail. CosinusPhi/Blindleistung/Scheinleistung
-// sont déjà calculées côté backend dans /sensors-discovery et /sensors-connected.
+// ─── MAPPING METRIC OPTIONS (Strom / Wirkleistung / Spannung / Energie / Blindleistung / Scheinleistung) ────────────────
+// ✅ Étendu aux mesures de "Live Daten" (comme Kundendaten) — utilisé pour les
+// cartes Sensor et le résumé du détail. Blindleistung/Scheinleistung sont déjà
+// calculées côté backend dans /sensors-discovery et /sensors-connected —
+// désormais directement depuis U×I en temps réel (voir server.js).
+// ✅ MODIFIÉ : Cosinus Phi retiré de l'affichage — le backend continue de le
+// calculer en interne (nécessaire pour Blindleistung/Scheinleistung).
+// ✅ MODIFIÉ : Energie affichée en Wh (au lieu de kWh) — la conversion est
+// faite en amont, côté Node-RED (valeur × 1000 avant écriture InfluxDB).
 const MAPPING_METRIC_OPTIONS = [
   { value: "Strom",         label: "Strom (A)",          icon: ElectricBoltIcon,        decimals: 3, unit: "A"   },
   { value: "CosinusPhi",    label: "Cosinus Phi",         icon: FunctionsIcon,           decimals: 4, unit: ""    },
@@ -948,7 +961,7 @@ const MAPPING_METRIC_OPTIONS = [
   { value: "Blindleistung", label: "Blindleistung (var)", icon: FlashOnIcon,             decimals: 2, unit: "var" },
   { value: "Scheinleistung",label: "Scheinleistung (VA)", icon: TimelineIcon,            decimals: 2, unit: "VA"  },
   { value: "Spannung",      label: "Spannung (V)",        icon: VoltageSvgIcon,          decimals: 1, unit: "V"   },
-  { value: "Energie",       label: "Energie (kWh)",       icon: BatteryChargingFullIcon, decimals: 2, unit: "kWh" },
+  { value: "Energie",       label: "Energie (Wh)",        icon: BatteryChargingFullIcon, decimals: 0, unit: "Wh"  },
 ];
 const MAPPING_METRIC_LABELS = {
   Strom:          "Strom (A)",
@@ -957,18 +970,18 @@ const MAPPING_METRIC_LABELS = {
   Blindleistung:  "Blindleistung (var)",
   Scheinleistung: "Scheinleistung (VA)",
   Spannung:       "Spannung (V)",
-  Energie:        "Energie (kWh)",
+  Energie:        "Energie (Wh)",
 };
 // ✅ Le graphique d'historique (/sensor-history) ne supporte que les mesures
-// stockées directement en InfluxDB — CosinusPhi/Blindleistung/Scheinleistung
-// sont calculées à la volée et n'ont pas d'historique propre. On restreint donc
+// stockées directement en InfluxDB — Blindleistung/Scheinleistung sont
+// calculées à la volée et n'ont pas d'historique propre. On restreint donc
 // le sélecteur de courbe à ces 4-là, tandis que le résumé/les cartes utilisent
-// bien les 7 valeurs ci-dessus.
+// bien les valeurs ci-dessus.
 const MAPPING_HISTORY_METRIC_LABELS = {
   Strom:        "Strom (A)",
   Wirkleistung: "Wirkleistung (W)",
   Spannung:     "Spannung (V)",
-  Energie:      "Energie (kWh)",
+  Energie:      "Energie (Wh)",
 };
 const KANAL_LABELS = { "1": "L1", "2": "L2", "3": "L3", "4": "N" };
 const KANAL_OPTIONS = ["1", "2", "3", "4"];
@@ -1140,8 +1153,13 @@ const MappingManager = () => {
   const [liveOnly, setLiveOnly]                     = useState(false);
   const isMobile = useMediaQuery("(max-width:600px)");
 
-  const loadSensors = async (isManualRefresh = false, useLiveOnly = liveOnly) => {
-    if (isManualRefresh) setRefreshing(true); else setLoading(true);
+  // ✅ silent=true : rafraîchissement en arrière-plan (auto, chaque seconde),
+  // sans spinner ni message "erkannt" — évite le clignotement de l'interface.
+  // isManualRefresh=true : clic sur le bouton "Aktualisieren" (comportement
+  // inchangé, avec message de confirmation).
+  const loadSensors = async (isManualRefresh = false, useLiveOnly = liveOnly, silent = false) => {
+    if (isManualRefresh) setRefreshing(true);
+    else if (!silent) setLoading(true);
     try {
       const endpoint = useLiveOnly ? "/sensors-connected" : "/sensors-discovery";
       const res = await axios.get(`${API_BASE_URL}${endpoint}`);
@@ -1152,9 +1170,14 @@ const MappingManager = () => {
         setTimeout(() => setMessage(""), 3000);
       }
     } catch (err) {
-      setMessageType("error");
-      setMessage("❌ Fehler beim Abrufen der Sensoren: " + (err.message || "Netzwerkproblem"));
-      setTimeout(() => setMessage(""), 5000);
+      // ✅ Une erreur lors d'un rafraîchissement silencieux ne doit pas
+      // spammer l'utilisateur toutes les secondes — seuls le chargement
+      // initial et le clic manuel affichent un message d'erreur.
+      if (!silent) {
+        setMessageType("error");
+        setMessage("❌ Fehler beim Abrufen der Sensoren: " + (err.message || "Netzwerkproblem"));
+        setTimeout(() => setMessage(""), 5000);
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -1162,6 +1185,14 @@ const MappingManager = () => {
   };
 
   useEffect(() => { loadSensors(false, liveOnly); }, [liveOnly]);
+
+  // ✅ Rafraîchissement automatique des valeurs (Strom, Energie, Cosinus Phi...)
+  // toutes les secondes, comme la vue "Live Daten" — en silencieux, sans
+  // recharger l'état "loading" ni le message de confirmation.
+  useEffect(() => {
+    const iv = setInterval(() => loadSensors(false, liveOnly, true), 1000);
+    return () => clearInterval(iv);
+  }, [liveOnly]);
 
   // ✅ Bascule le toggle ; le useEffect ci-dessus recharge automatiquement
   const handleToggleLiveOnly = () => setLiveOnly(prev => !prev);
@@ -1199,6 +1230,48 @@ const MappingManager = () => {
   const shouldShowSensor = device => selectedSensors.length === 0 || selectedSensors.includes(device);
   const shouldShowMetric = key    => selectedMappingMetrics.length === 0 || selectedMappingMetrics.includes(key);
   const shouldShowKanal   = kanal  => selectedKanaele.length === 0 || selectedKanaele.includes(kanal);
+
+  // ✅ Reset logiciel du compteur Energie (baseline soustraite côté serveur).
+  // Le compteur matériel du Volt1000S continue de tourner en arrière-plan ;
+  // seul l'affichage repart de 0. Un dialogue MUI (plutôt qu'un window.confirm
+  // du navigateur) permet un texte professionnel en allemand et une icône
+  // cohérente avec le reste de l'interface.
+  const [resetTarget, setResetTarget]   = useState(null); // { device, kanal } | null
+  const [resetLoading, setResetLoading] = useState(false);
+
+  // ✅ Retire toute adresse IP (ex: présente dans une URL d'erreur réseau)
+  // avant d'afficher un message à l'utilisateur — aucune IP interne ne doit
+  // apparaître dans l'interface.
+  const stripIps = (text) =>
+    String(text || "")
+      .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b(:\d+)?/g, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+
+  const handleResetEnergieClick = (device, kanal, e) => {
+    e.stopPropagation();
+    setResetTarget({ device, kanal });
+  };
+
+  const confirmResetEnergie = async () => {
+    if (!resetTarget) return;
+    const { device, kanal } = resetTarget;
+    setResetLoading(true);
+    try {
+      await axios.post(`${API_BASE_URL}/energie-reset`, { device, kanal });
+      setMessageType("success");
+      setMessage(`✅ Energiezähler für ${device}, Kanal ${kanal} wurde zurückgesetzt.`);
+      setTimeout(() => setMessage(""), 3000);
+      loadSensors(false, liveOnly);
+    } catch (err) {
+      setMessageType("error");
+      setMessage("❌ Der Energiezähler konnte nicht zurückgesetzt werden. " + stripIps(err.message || "Bitte erneut versuchen."));
+      setTimeout(() => setMessage(""), 5000);
+    } finally {
+      setResetLoading(false);
+      setResetTarget(null);
+    }
+  };
 
   if (detailDevice) {
     const sensorObj = otherSensors.find(s => s.device === detailDevice);
@@ -1372,7 +1445,20 @@ const MappingManager = () => {
                             <Icon sx={{ color: INK_MUTED, fontSize: "0.8rem" }} />
                             <Typography variant="caption" sx={{ color: INK_MUTED }}>{m.value === "CosinusPhi" ? "Cosinus Phi:" : m.label.split(" ")[0] + ":"}</Typography>
                           </Box>
-                          <ValueBadge>{formatValue(k[m.value], m.decimals, m.unit)}</ValueBadge>
+                          <Box display="flex" alignItems="center" gap={0.5}>
+                            <ValueBadge>{formatValue(k[m.value], m.decimals, m.unit)}</ValueBadge>
+                            {/* ✅ Espace réservé de largeur fixe sur TOUTES les lignes (même
+                                sans icône) — évite que la ligne Energie décale son ValueBadge
+                                par rapport aux autres lignes (Strom, Wirkleistung, etc.) */}
+                            <Box sx={{ width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                              {m.value === "Energie" && (
+                                <IconButton size="small" onClick={(e) => handleResetEnergieClick(device, k.kanal, e)}
+                                  sx={{ p: "3px" }} title="Zähler zurücksetzen">
+                                  <RestartAltIcon sx={{ fontSize: "0.95rem", color: INK_MUTED }} />
+                                </IconButton>
+                              )}
+                            </Box>
+                          </Box>
                         </Box>
                       );
                     })}
@@ -1383,6 +1469,41 @@ const MappingManager = () => {
           );
         })
       )}
+
+      {/* ✅ Dialogue de confirmation professionnel (allemand), remplace
+          window.confirm — icône cohérente avec le design du portail, aucune
+          adresse IP n'y est jamais affichée. */}
+      <Dialog open={Boolean(resetTarget)} onClose={() => !resetLoading && setResetTarget(null)}
+        PaperProps={{ sx: { borderRadius: "16px" } }}>
+        <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1.5, pb: 1 }}>
+          <Box sx={{ display: "inline-flex", width: 40, height: 40, borderRadius: "50%", bgcolor: WARNING_BG, alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <RestartAltIcon sx={{ color: WARNING, fontSize: 22 }} />
+          </Box>
+          <Typography variant="h6" sx={{ color: INK, fontWeight: 700 }}>Energiezähler zurücksetzen</Typography>
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ color: INK_MUTED, lineHeight: 1.6 }}>
+            Möchten Sie den Energiezähler für{" "}
+            <Box component="span" sx={{ fontWeight: 700, color: INK }}>
+              {resetTarget?.device}, Kanal {resetTarget?.kanal}
+            </Box>{" "}
+            wirklich zurücksetzen?
+          </Typography>
+          <Typography variant="body2" sx={{ color: INK_MUTED, mt: 1.5, lineHeight: 1.6 }}>
+            Die Anzeige beginnt anschließend wieder bei 0 Wh. Der interne Zähler des Messgeräts läuft im Hintergrund unverändert weiter.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2.5 }}>
+          <Button onClick={() => setResetTarget(null)} disabled={resetLoading}
+            sx={{ borderRadius: 20, color: INK_MUTED, fontWeight: 700 }}>
+            Abbrechen
+          </Button>
+          <Button onClick={confirmResetEnergie} variant="contained" disabled={resetLoading}
+            sx={{ borderRadius: 20, bgcolor: WARNING, boxShadow: "none", "&:hover": { bgcolor: "#96631A", boxShadow: "none" } }}>
+            {resetLoading ? "Wird zurückgesetzt…" : "Zurücksetzen"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </>
   );
 };
