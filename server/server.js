@@ -1,6 +1,8 @@
 const express = require("express");
 const cors    = require("cors");
 const axios   = require("axios");
+const fs      = require("fs");
+const path    = require("path");
 const { InfluxDB, Point } = require("@influxdata/influxdb-client");
 
 const app = express();
@@ -357,7 +359,33 @@ app.post("/kundendaten-labels", (req, res) => {
 // compteur journalier affiché à côté du kilométrage total d'une voiture.
 // ⚠️ Cette baseline est en mémoire uniquement (perdue si le serveur redémarre),
 // comme kundenLabels ci-dessus.
-let energieResetOffsets = {};
+// ⚠️ CORRIGÉ : cette baseline était auparavant en mémoire uniquement — si le
+// serveur redémarrait (crash, redéploiement...), le reset était "oublié" et
+// l'affichage retombait brutalement sur la valeur brute complète (le fameux
+// "1230..." qui revenait tout seul). Elle est désormais sauvegardée dans un
+// fichier sur disque, chargée au démarrage, et réécrite à chaque reset.
+const ENERGIE_RESET_FILE = path.join(__dirname, "energie-reset-offsets.json");
+
+function loadEnergieResetOffsets() {
+    try {
+        if (fs.existsSync(ENERGIE_RESET_FILE)) {
+            return JSON.parse(fs.readFileSync(ENERGIE_RESET_FILE, "utf8"));
+        }
+    } catch (err) {
+        console.error("[Energie-Reset] Fehler beim Laden der gespeicherten Baseline:", err.message);
+    }
+    return {};
+}
+
+function saveEnergieResetOffsets() {
+    try {
+        fs.writeFileSync(ENERGIE_RESET_FILE, JSON.stringify(energieResetOffsets, null, 2));
+    } catch (err) {
+        console.error("[Energie-Reset] Fehler beim Speichern der Baseline:", err.message);
+    }
+}
+
+let energieResetOffsets = loadEnergieResetOffsets();
 
 function getEnergieOffsetKey(device, kanal) {
     return `${device}_${kanal}`;
@@ -386,7 +414,8 @@ app.post("/energie-reset", async (req, res) => {
         const rawValue = rows[0]?._value ?? 0;
         const key      = getEnergieOffsetKey(device, String(kanal));
         energieResetOffsets[key] = rawValue;
-        console.log(`[Energie-Reset] ${key}: Baseline gesetzt auf ${rawValue} Wh`);
+        saveEnergieResetOffsets();
+        console.log(`[Energie-Reset] ${key}: Baseline gesetzt auf ${rawValue} Wh (gespeichert)`);
         res.json({ success: true, device, kanal: String(kanal), baseline: rawValue });
     } catch (err) {
         console.error("[POST /energie-reset] Fehler:", err);
