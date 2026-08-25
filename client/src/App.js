@@ -3,7 +3,7 @@
 // même typographie, mêmes cartes à bordure fine sans ombre lourde, mêmes
 // pastilles de statut). Toute la logique métier (état, appels API, polling)
 // est strictement inchangée — seul l'habillage visuel a été repris.
-import React, { useEffect, useState, useCallback, useRef, memo } from "react";
+import React, { useEffect, useState, useCallback, memo } from "react";
 import axios from "axios";
 import { ThemeProvider, createTheme } from "@mui/material/styles";
 import {
@@ -46,7 +46,6 @@ const BORDER     = '#E3E6EB';
 const SUCCESS    = '#1E8A5D';
 const SUCCESS_BG = '#E7F5EE';
 const DANGER     = '#C0392B';
-const DANGER_BG  = '#FBEAE8';
 const WARNING    = '#B7791F';
 const WARNING_BG = '#FBF1DE';
 const BRAND      = '#0a5e8c';
@@ -96,21 +95,11 @@ const theme = createTheme({
 
 const API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:4000`;
 const STARTSEITE_URL = "http://192.168.1.20:8080";
-// ✅ Conservé pour compatibilité (anciennes références) — pointe désormais sur BRAND
-const PRIMARY_COLOR = BRAND;
 
 // ✅ Affichage des canaux en lettres (CH A, CH B, CH C...) au lieu de
 // numéros (CH1, CH2...). Les clés internes restent "CH1".."CH18" partout
 // (API, mapping, tri, filtres) — seul le texte affiché change.
 const CHANNEL_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-const formatChannelName = (ch) => {
-  const match = String(ch).match(/(\d+)\s*$/);
-  if (!match) return ch;
-  const num = parseInt(match[1], 10);
-  const letter = CHANNEL_LETTERS[num - 1];
-  return letter ? `CH ${letter}` : ch;
-};
-const formatChannelShort = formatChannelName;
 
 // ✅ Rendu à deux tons pour la lisibilité : "CH" en gris discret, la lettre
 // en couleur marque et en gras — bien plus lisible qu'un bloc de texte uni.
