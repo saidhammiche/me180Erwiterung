@@ -172,6 +172,17 @@ const formatValue = (value, decimals = 3, unit = "") => {
   return `${num.toFixed(decimals)}${unit ? " " + unit : ""}`;
 };
 
+// ✅ Le serveur/Node-RED stockent et transmettent le champ "Energie" (vue
+// Mapping, Sensor1/Sensor2) en Wh — seule la vue "Mapping" en affiche le
+// résultat en kWh (division par 1000), sans toucher au stockage ni à
+// Node-RED. Utilisé uniquement pour metric.value === "Energie" dans cette vue.
+const formatMappingMetricValue = (metric, rawValue) => {
+  const value = metric.value === "Energie" && rawValue !== null && rawValue !== undefined
+    ? rawValue / 1000
+    : rawValue;
+  return formatValue(value, metric.decimals, metric.unit);
+};
+
 // ─── Petit badge de valeur (chiffre en mono, cohérent avec le portail) ──────
 const ValueBadge = ({ children, muted = false }) => (
   <Box sx={{
@@ -961,7 +972,7 @@ const MAPPING_METRIC_OPTIONS = [
   { value: "Blindleistung", label: "Blindleistung (var)", icon: FlashOnIcon,             decimals: 2, unit: "var" },
   { value: "Scheinleistung",label: "Scheinleistung (VA)", icon: TimelineIcon,            decimals: 2, unit: "VA"  },
   { value: "Spannung",      label: "Spannung (V)",        icon: VoltageSvgIcon,          decimals: 1, unit: "V"   },
-  { value: "Energie",       label: "Energie (Wh)",        icon: BatteryChargingFullIcon, decimals: 0, unit: "Wh"  },
+  { value: "Energie",       label: "Energie (kWh)",       icon: BatteryChargingFullIcon, decimals: 2, unit: "kWh" },
 ];
 const MAPPING_METRIC_LABELS = {
   Strom:          "Strom (A)",
@@ -970,7 +981,7 @@ const MAPPING_METRIC_LABELS = {
   Blindleistung:  "Blindleistung (var)",
   Scheinleistung: "Scheinleistung (VA)",
   Spannung:       "Spannung (V)",
-  Energie:        "Energie (Wh)",
+  Energie:        "Energie (kWh)",
 };
 // ✅ Le graphique d'historique (/sensor-history) ne supporte que les mesures
 // stockées directement en InfluxDB — Blindleistung/Scheinleistung sont
@@ -981,7 +992,7 @@ const MAPPING_HISTORY_METRIC_LABELS = {
   Strom:        "Strom (A)",
   Wirkleistung: "Wirkleistung (W)",
   Spannung:     "Spannung (V)",
-  Energie:      "Energie (Wh)",
+  Energie:      "Energie (kWh)",
 };
 const KANAL_LABELS = { "1": "L1", "2": "L2", "3": "L3", "4": "N" };
 const KANAL_OPTIONS = ["1", "2", "3", "4"];
@@ -1012,7 +1023,15 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
         const res = await axios.get(
           `${API_BASE_URL}/sensor-history/${device}/${selectedKanal}?metric=${selectedMetric}&time=${timeRange}`
         );
-        if (!cancelled && res.data?.data) setHistoryData(res.data.data);
+        if (!cancelled && res.data?.data) {
+          // ✅ Le serveur renvoie "Energie" en Wh (stockage inchangé) — cette
+          // vue l'affiche en kWh, donc conversion ici uniquement, à l'affichage.
+          const rawData = res.data.data;
+          const converted = (selectedMetric === "Energie")
+            ? rawData.map(pt => ({ ...pt, Energie: pt.Energie !== null && pt.Energie !== undefined ? pt.Energie / 1000 : pt.Energie }))
+            : rawData;
+          setHistoryData(converted);
+        }
       } catch (err) { console.error("Erreur historique sensor-history:", err); }
     };
     update();
@@ -1096,7 +1115,7 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
             <Typography variant="caption" sx={{ color: INK_MUTED, display: 'block', pt: 1.2 }}>{m.label}</Typography>
             <Box sx={{ mx: 1.2, my: 1.2, bgcolor: READOUT_BG, borderRadius: '8px', py: 1.4 }}>
               <Typography variant="h6" sx={{ fontFamily: MONO_FONT, fontWeight: 700, color: '#7CC7E8' }}>
-                {formatValue(currentKanalData[m.value], m.decimals, m.unit)}
+                {formatMappingMetricValue(m, currentKanalData[m.value])}
               </Typography>
             </Box>
           </Paper>
@@ -1446,7 +1465,7 @@ const MappingManager = () => {
                             <Typography variant="caption" sx={{ color: INK_MUTED }}>{m.value === "CosinusPhi" ? "Cosinus Phi:" : m.label.split(" ")[0] + ":"}</Typography>
                           </Box>
                           <Box display="flex" alignItems="center" gap={0.5}>
-                            <ValueBadge>{formatValue(k[m.value], m.decimals, m.unit)}</ValueBadge>
+                            <ValueBadge>{formatMappingMetricValue(m, k[m.value])}</ValueBadge>
                             {/* ✅ Espace réservé de largeur fixe sur TOUTES les lignes (même
                                 sans icône) — évite que la ligne Energie décale son ValueBadge
                                 par rapport aux autres lignes (Strom, Wirkleistung, etc.) */}
