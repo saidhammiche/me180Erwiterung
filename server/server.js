@@ -439,14 +439,11 @@ function computeApparentAndReactive(P, cosPhi) {
     return { S, Q };
 }
 
-// ✅ NOUVEAU : calcul de la puissance apparente/réactive directement à partir
-// de U (Spannung) et I (Strom), tous deux mesurés toutes les 5 secondes —
-// au lieu d'attendre le Cosinus Phi, qui n'est récupéré qu'une fois par heure
-// via la CGI (get_live_values.cgi). Formule du triangle de puissance :
-//   S (VA)  = U × I
-//   Q (var) = √(S² − P²)
-//   cosφ    = P / S
-// Utilisé pour le système Sensor1/Sensor2 (onglet Mapping/Sensor-Bezeichnung).
+// ⚠️ NON UTILISÉE DANS discoverSensors() : cette fonction calculait S/Q/cosφ
+// a partir de U x I. Depuis que le flow Node-RED ecrit CosPhi, Blindleistung
+// et Scheinleistung directement (lecture Modbus reelle), discoverSensors()
+// lit ces valeurs telles quelles depuis InfluxDB au lieu de les recalculer.
+// Fonction laissee en place (non appelee) pour ne rien modifier d'autre.
 function computeApparentAndReactiveFromUI(U, I, P) {
     if (U === null || U === undefined || isNaN(U) || I === null || I === undefined || isNaN(I)) {
         return { S: null, Q: null, cosPhi: null };
@@ -462,6 +459,10 @@ function computeApparentAndReactiveFromUI(U, I, P) {
 
 // ========== DECOUVERTE DYNAMIQUE SENSOR/KANAL (FONCTION PARTAGEE) ==========
 
+// ⚠️ NON UTILISÉE DANS discoverSensors() : servait uniquement a la
+// correlation CosPhi horaire (CGI) via un canal global "Sensor0", supprimee
+// ci-dessous puisque CosPhi est maintenant lu directement par Device/Kanal.
+// Fonction laissee en place (non appelee) pour ne rien modifier d'autre.
 function findChannelForDeviceKanal(device, kanal) {
     for (const [ch, map] of Object.entries(channelMapping)) {
         if (map.device === device && map.kanal === String(kanal)) return ch;
@@ -480,19 +481,24 @@ async function discoverSensors(rangeStart) {
         ? "-30d"
         : rangeStart;
 
+    // ✅ CORRIGÉ : le flow Node-RED Volt1000S écrit désormais Strom,
+    // Wirkleistung, Blindleistung, Scheinleistung, CosPhi et Energie bruts
+    // pour chaque capteur/canal (plus de calcul U×I nécessaire) — ces champs
+    // avaient été retirés de cette requête lors d'une étape intermédiaire
+    // (réduction temporaire à 3 valeurs) et jamais remis depuis. Spannung
+    // reste lue via le device "Netz"/"Sensor0" (tension par phase).
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
           |> range(start: ${start})
           |> filter(fn: (r) => r["_measurement"] == "sensoren")
-          |> filter(fn: (r) => r["_field"] == "Strom" or r["_field"] == "Wirkleistung" or r["_field"] == "Spannung" or r["_field"] == "Energie" or r["_field"] == "CosPhi")
+          |> filter(fn: (r) => r["_field"] == "Strom" or r["_field"] == "Wirkleistung" or r["_field"] == "Blindleistung" or r["_field"] == "Scheinleistung" or r["_field"] == "CosPhi" or r["_field"] == "Energie" or r["_field"] == "Spannung")
           |> last()
     `;
 
     const rows = await queryApi.collectRows(fluxQuery);
 
-    // Regrouper par Device -> Kanal -> { Strom, Wirkleistung, Spannung, Energie, CosinusPhi, time }
+    // Regrouper par Device -> Kanal -> { Strom, Wirkleistung, Blindleistung, Scheinleistung, Energie, CosinusPhi, Spannung, time }
     const bySensor = {};
-    const cosPhiByGlobalChannel = {};
 
     rows.forEach(row => {
         const device = row.Device;
@@ -501,20 +507,28 @@ async function discoverSensors(rangeStart) {
 
         if (!device) return;
 
-        if (device === "Sensor0" && field === "CosPhi") {
-            cosPhiByGlobalChannel[kanal] = row._value;
-            return;
-        }
-
         if (!bySensor[device]) bySensor[device] = {};
         if (!bySensor[device][kanal]) {
-            bySensor[device][kanal] = { kanal, Strom: null, Wirkleistung: null, Spannung: null, Energie: null, CosinusPhi: null, updatedAt: null };
+            bySensor[device][kanal] = {
+                kanal,
+                Strom: null,
+                Wirkleistung: null,
+                Blindleistung: null,
+                Scheinleistung: null,
+                Energie: null,
+                CosinusPhi: null,
+                Spannung: null,
+                updatedAt: null
+            };
         }
 
-        if      (field === "Strom")        bySensor[device][kanal].Strom        = row._value;
-        else if (field === "Wirkleistung")  bySensor[device][kanal].Wirkleistung = row._value;
-        else if (field === "Spannung")      bySensor[device][kanal].Spannung     = row._value;
-        else if (field === "Energie")       bySensor[device][kanal].Energie      = row._value;
+        if      (field === "Strom")          bySensor[device][kanal].Strom          = row._value;
+        else if (field === "Wirkleistung")   bySensor[device][kanal].Wirkleistung   = row._value;
+        else if (field === "Blindleistung")  bySensor[device][kanal].Blindleistung  = row._value;
+        else if (field === "Scheinleistung") bySensor[device][kanal].Scheinleistung = row._value;
+        else if (field === "Energie")        bySensor[device][kanal].Energie        = row._value;
+        else if (field === "CosPhi")         bySensor[device][kanal].CosinusPhi     = row._value;
+        else if (field === "Spannung")       bySensor[device][kanal].Spannung       = row._value;
 
         const t = new Date(row._time).getTime();
         if (!bySensor[device][kanal].updatedAt || t > bySensor[device][kanal].updatedAt) {
@@ -522,18 +536,15 @@ async function discoverSensors(rangeStart) {
         }
     });
 
-    // ✅ Fallback : CosPhi horaire (CGI), utilisé seulement si U×I n'est pas
-    // calculable (tension manquante, ex: Kanal 4 / Neutre).
-    for (const device of Object.keys(bySensor)) {
-        for (const kanal of Object.keys(bySensor[device])) {
-            const ch = findChannelForDeviceKanal(device, kanal);
-            if (!ch) continue;
-            const chNum = String(channelNumber(ch));
-            if (cosPhiByGlobalChannel[chNum] !== undefined) {
-                bySensor[device][kanal].CosinusPhi = cosPhiByGlobalChannel[chNum];
-            }
-        }
-    }
+    // ✅ Tension de référence par phase (device "Netz"/"Sensor0", kanal 1/2/3
+    // = L1/L2/L3), à rattacher à chaque capteur de courant selon son canal
+    // — uniquement utile en secours si un capteur n'a pas sa propre Spannung.
+    const netzDevice = bySensor["Netz"] || bySensor["Sensor0"] || {};
+    const netzVoltageByKanal = {
+        "1": netzDevice["1"]?.Spannung ?? null,
+        "2": netzDevice["2"]?.Spannung ?? null,
+        "3": netzDevice["3"]?.Spannung ?? null,
+    };
 
     const sensorNames = Object.keys(bySensor).sort((a, b) => {
         const rank = (name) => {
@@ -544,24 +555,10 @@ async function discoverSensors(rangeStart) {
         return rank(a) - rank(b);
     });
 
-    // ✅ Tensions de phase (Sensor0/Netz, Kanal 1/2/3 = L1/L2/L3) — servent à
-    // calculer S et Q en direct pour Sensor1/Sensor2/etc., toutes les 5s,
-    // sans dépendre du CosPhi horaire (CGI). Le Kanal "4" (Neutre) n'a pas
-    // de tension de phase propre : Blindleistung/Scheinleistung y resteront
-    // null (comportement attendu).
-    const netzDevice = bySensor["Netz"] || bySensor["Sensor0"] || {};
-    const netzVoltageByKanal = {
-        "1": netzDevice["1"]?.Spannung ?? null,
-        "2": netzDevice["2"]?.Spannung ?? null,
-        "3": netzDevice["3"]?.Spannung ?? null,
-    };
-
     return sensorNames.map(device => {
         const kanaux = Object.values(bySensor[device])
             .sort((a, b) => parseInt(a.kanal, 10) - parseInt(b.kanal, 10))
             .map(k => {
-                const U = netzVoltageByKanal[k.kanal] ?? null;
-                const { S, Q, cosPhi } = computeApparentAndReactiveFromUI(U, k.Strom, k.Wirkleistung);
                 // ✅ Applique le reset logiciel (soustrait la baseline mémorisée
                 // au dernier clic sur "Zähler zurücksetzen"), le cas échéant.
                 // Ne modifie que l'affichage — le compteur matériel réel du
@@ -570,15 +567,18 @@ async function discoverSensors(rangeStart) {
                 const adjustedEnergie = (k.Energie !== null && k.Energie !== undefined && !isNaN(k.Energie))
                     ? Math.max(0, k.Energie - offset)
                     : k.Energie;
+                // Spannung propre au capteur (déjà en base) ; à défaut,
+                // secours via la tension de phase du device "Netz".
+                const spannung = (device === "Netz" || device === "Sensor0")
+                    ? k.Spannung
+                    : (k.Spannung ?? netzVoltageByKanal[k.kanal] ?? null);
                 return {
                     ...k,
-                    Energie:        adjustedEnergie,
-                    Bezeichnung:    getKundenLabel(device, k.kanal),
-                    Scheinleistung: S,
-                    Blindleistung:  Q,
-                    // Priorité au cosφ calculé en direct (U×I) ; sinon
-                    // fallback sur l'ancien CosPhi horaire (CGI).
-                    CosinusPhi:     cosPhi !== null ? cosPhi : k.CosinusPhi
+                    Energie:     adjustedEnergie,
+                    Spannung:    spannung,
+                    Bezeichnung: getKundenLabel(device, k.kanal)
+                    // Wirkleistung, Blindleistung, Scheinleistung, CosinusPhi
+                    // viennent déjà de k (lus bruts depuis InfluxDB ci-dessus).
                 };
             });
         return { device, kanaele: kanaux };
@@ -657,7 +657,7 @@ function getAggregationWindow(duration) {
 app.get("/sensor-history/:device/:kanal", async (req, res) => {
     const { device, kanal } = req.params;
     const metric = req.query.metric || "Strom";
-    const allowedMetrics = ["Strom", "Wirkleistung", "Spannung", "Energie"];
+    const allowedMetrics = ["Strom", "Wirkleistung", "Blindleistung", "Spannung", "Energie", "CosPhi"];
     if (!allowedMetrics.includes(metric)) {
         return res.status(400).json({ error: "Ungültige Messgröße" });
     }

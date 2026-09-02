@@ -161,6 +161,42 @@ const formatValue = (value, decimals = 3, unit = "") => {
   return `${num.toFixed(decimals)}${unit ? " " + unit : ""}`;
 };
 
+// ✅ MODIFIÉ : Strom, Wirkleistung, Blindleistung et CosinusPhi sont tous les
+// 4 lus en une seule requête Modbus groupée (adresses contiguës 0x5018-0x5037
+// sur l'appareil) et écrits bruts dans InfluxDB — ce ne sont donc plus des
+// valeurs calculées ici. Seule Scheinleistung (S = U × I) reste calculée côté
+// React, à partir de Strom + de la tension partagée "Netz" (lue une seule
+// fois pour toute l'installation, pas par capteur).
+const computeScheinleistung = (U, I) => {
+  if (U === null || U === undefined || isNaN(U) || I === null || I === undefined || isNaN(I)) {
+    return null;
+  }
+  return U * I;
+};
+
+// ✅ NOUVEAU : injecte Spannung (depuis le device "Netz", lu une seule fois
+// pour toute l'installation) et Scheinleistung calculée sur chaque Kanal de
+// chaque Sensor. Le Kanal "4" (Neutre) n'a pas de tension de phase propre
+// dans "Netz" : ces champs y restent null (comportement inchangé).
+const augmentSensorsWithDerivedValues = (rawSensors) => {
+  const netzDevice = rawSensors.find(s => s.device === "Netz" || s.device === "Sensor0");
+  const voltageForKanal = (kanal) => {
+    if (!netzDevice) return null;
+    const k = netzDevice.kanaele.find(k => k.kanal === kanal);
+    return k?.Spannung ?? null;
+  };
+  return rawSensors.map(s => {
+    if (s === netzDevice) return s;
+    return {
+      ...s,
+      kanaele: s.kanaele.map(k => {
+        const U = voltageForKanal(k.kanal);
+        return { ...k, Spannung: U, Scheinleistung: computeScheinleistung(U, k.Strom) };
+      })
+    };
+  });
+};
+
 // ✅ Le serveur/Node-RED stockent et transmettent le champ "Energie" (vue
 // Mapping, Sensor1/Sensor2) en Wh — seule la vue "Mapping" en affiche le
 // résultat en kWh (division par 1000), sans toucher au stockage ni à
@@ -947,9 +983,9 @@ const EnergyManager = () => {
 
 // ─── MAPPING METRIC OPTIONS (Strom / Wirkleistung / Spannung / Energie / Blindleistung / Scheinleistung) ────────────────
 // ✅ Étendu aux mesures de "Live Daten" (comme Kundendaten) — utilisé pour les
-// cartes Sensor et le résumé du détail. Blindleistung/Scheinleistung sont déjà
-// calculées côté backend dans /sensors-discovery et /sensors-connected —
-// désormais directement depuis U×I en temps réel (voir server.js).
+// cartes Sensor et le résumé du détail. Blindleistung/Scheinleistung sont
+// désormais calculées côté React (voir computeDerivedFromUI plus haut), à
+// partir de Strom + CosinusPhi (lus en Modbus) et Spannung (Netz, partagée).
 // ✅ MODIFIÉ : Cosinus Phi retiré de l'affichage — le backend continue de le
 // calculer en interne (nécessaire pour Blindleistung/Scheinleistung).
 // ✅ MODIFIÉ : Energie affichée en Wh (au lieu de kWh) — la conversion est
@@ -966,22 +1002,27 @@ const MAPPING_METRIC_OPTIONS = [
 const MAPPING_METRIC_LABELS = {
   Strom:          "Strom (A)",
   CosinusPhi:     "Cosinus Phi",
+  // ✅ AJOUT : "CosPhi" (nom du champ InfluxDB réel, distinct de la clé
+  // d'affichage "CosinusPhi" ci-dessus) — utilisé uniquement par le sélecteur
+  // d'historique (graphique), qui interroge directement ce champ brut.
+  CosPhi:         "Cosinus Phi",
   Wirkleistung:   "Wirkleistung (W)",
   Blindleistung:  "Blindleistung (var)",
   Scheinleistung: "Scheinleistung (VA)",
   Spannung:       "Spannung (V)",
   Energie:        "Energie (kWh)",
 };
-// ✅ Le graphique d'historique (/sensor-history) ne supporte que les mesures
-// stockées directement en InfluxDB — Blindleistung/Scheinleistung sont
-// calculées à la volée et n'ont pas d'historique propre. On restreint donc
-// le sélecteur de courbe à ces 4-là, tandis que le résumé/les cartes utilisent
-// bien les valeurs ci-dessus.
+// ✅ MODIFIÉ : Strom, Wirkleistung, Blindleistung et CosPhi sont de nouveau
+// stockées brutes (lues en un seul bloc Modbus) — elles ont donc à nouveau
+// un historique réel par capteur/canal. Seules Spannung (device "Netz",
+// hors de ce sélecteur par capteur) et Scheinleistung (calculée, sans
+// historique propre) restent absentes de ce sélecteur.
 const MAPPING_HISTORY_METRIC_LABELS = {
-  Strom:        "Strom (A)",
-  Wirkleistung: "Wirkleistung (W)",
-  Spannung:     "Spannung (V)",
-  Energie:      "Energie (kWh)",
+  Strom:         "Strom (A)",
+  Wirkleistung:  "Wirkleistung (W)",
+  Blindleistung: "Blindleistung (var)",
+  CosPhi:        "Cosinus Phi",
+  Energie:       "Energie (kWh)",
 };
 const KANAL_LABELS = { "1": "L1", "2": "L2", "3": "L3", "4": "N" };
 const KANAL_OPTIONS = ["1", "2", "3", "4"];
@@ -1171,6 +1212,11 @@ const MappingManager = () => {
     try {
       const endpoint = useLiveOnly ? "/sensors-connected" : "/sensors-discovery";
       const res = await axios.get(`${API_BASE_URL}${endpoint}`);
+      // ✅ CORRIGÉ : le backend renvoie désormais Strom, Wirkleistung,
+      // Blindleistung, Scheinleistung, CosinusPhi, Energie et Spannung tous
+      // bruts (lus directement depuis InfluxDB) — plus besoin de recalculer
+      // quoi que ce soit ici. L'ancien calcul de Scheinleistung = U×I a été
+      // retiré : il écrasait la vraie valeur mesurée par une approximation.
       setSensors(res.data?.sensors || []);
       if (isManualRefresh) {
         setMessageType("success");
