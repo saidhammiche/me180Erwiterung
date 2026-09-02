@@ -471,14 +471,14 @@ function findChannelForDeviceKanal(device, kanal) {
 }
 
 async function discoverSensors(rangeStart) {
-    // ✅ CORRECTIF : un "0" nu comme borne "start" peut faire échouer la
-    // compilation Flux selon la version d'InfluxDB ("int is not assignable
-    // to type time"). On le convertit en une fenêtre bornée (30 jours) plutôt
-    // qu'un horodatage absolu depuis 1970 — largement suffisant pour lister
-    // tout capteur ayant déjà émis récemment, tout en gardant la requête
-    // légère même appelée toutes les secondes (polling live des cartes).
+    // ✅ CORRIGÉ : la fenêtre était de 30 jours, donc tout capteur ayant écrit
+    // ne serait-ce qu'une fois dans le mois (ex: anciens tests Sensor4/5)
+    // restait visible indéfiniment ("capteurs fantômes"). Réduit à une
+    // fenêtre courte (15s, un peu plus que le cycle de polling Modbus) :
+    // seuls les capteurs qui envoient réellement des données maintenant
+    // apparaissent — plus besoin de bascule "Verlauf" côté frontend.
     const start = (rangeStart === "0" || rangeStart === 0)
-        ? "-30d"
+        ? "-15s"
         : rangeStart;
 
     // ✅ CORRIGÉ : le flow Node-RED Volt1000S écrit désormais Strom,
@@ -616,13 +616,22 @@ app.get("/sensors-connected", async (req, res) => {
         const anzahl = await getRealConnectedSensorCount();
 
         const allSensors = await discoverSensors("0");
-        const result = allSensors.filter(s => {
+        // ✅ CORRIGÉ : "Netz"/"Sensor0" (tension par phase) est conservé dans
+        // la liste renvoyée — le frontend en a besoin pour les boîtes
+        // Spannung L1/L2/L3 — mais n'est pas compté comme un "Sensor" dans
+        // sensorCount (uniquement Sensor1..N où N = Sensoranzahl réelle).
+        const realSensorCount = allSensors.filter(s => {
             if (s.device === "Netz" || s.device === "Sensor0") return false;
+            const num = parseInt(s.device.replace("Sensor", ""), 10);
+            return !isNaN(num) && num <= anzahl;
+        }).length;
+        const result = allSensors.filter(s => {
+            if (s.device === "Netz" || s.device === "Sensor0") return true;
             const num = parseInt(s.device.replace("Sensor", ""), 10);
             return !isNaN(num) && num <= anzahl;
         });
 
-        res.json({ sensors: result, count: result.length, sensoranzahl: anzahl });
+        res.json({ sensors: result, count: realSensorCount, sensoranzahl: anzahl });
     } catch (err) {
         console.error("/sensors-connected error:", err);
         res.status(500).json({

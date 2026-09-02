@@ -1196,27 +1196,24 @@ const MappingManager = () => {
   const [kanalAnchorEl, setKanalAnchorEl]           = useState(null);
   const [detailDevice, setDetailDevice]             = useState(null);
   const [detailKanal, setDetailKanal]               = useState(null);
-  // ✅ Nouveau : toggle "capteurs réellement connectés maintenant" (10 dernières
-  // secondes, via /sensors-connected) vs historique complet (/sensors-discovery,
-  // comportement d'origine, inchangé par défaut).
-  const [liveOnly, setLiveOnly]                     = useState(false);
   const isMobile = useMediaQuery("(max-width:600px)");
 
-  // ✅ silent=true : rafraîchissement en arrière-plan (auto, chaque seconde),
-  // sans spinner ni message "erkannt" — évite le clignotement de l'interface.
-  // isManualRefresh=true : clic sur le bouton "Aktualisieren" (comportement
-  // inchangé, avec message de confirmation).
-  const loadSensors = async (isManualRefresh = false, useLiveOnly = liveOnly, silent = false) => {
+  // ✅ CORRIGÉ : /sensors-discovery comptait TOUS les devices présents en
+  // base (Sensor1/2/3 + Netz = 4 "Sensoren erkannt"), au lieu du vrai nombre
+  // de capteurs physiquement chaînés. On utilise désormais /sensors-connected,
+  // qui interroge le nœud Node-RED "Sensoranzahl" (lecture Modbus réelle du
+  // nombre de capteurs sur le bus RS485) et exclut déjà "Netz" du décompte.
+  // isManualRefresh=true : clic sur le bouton "Aktualisieren" (affiche un
+  // message de confirmation) ; silent=true : rafraîchissement automatique
+  // en arrière-plan, sans spinner ni message.
+  const loadSensors = async (isManualRefresh = false, silent = false) => {
     if (isManualRefresh) setRefreshing(true);
     else if (!silent) setLoading(true);
     try {
-      const endpoint = useLiveOnly ? "/sensors-connected" : "/sensors-discovery";
-      const res = await axios.get(`${API_BASE_URL}${endpoint}`);
-      // ✅ CORRIGÉ : le backend renvoie désormais Strom, Wirkleistung,
-      // Blindleistung, Scheinleistung, CosinusPhi, Energie et Spannung tous
-      // bruts (lus directement depuis InfluxDB) — plus besoin de recalculer
-      // quoi que ce soit ici. L'ancien calcul de Scheinleistung = U×I a été
-      // retiré : il écrasait la vraie valeur mesurée par une approximation.
+      const res = await axios.get(`${API_BASE_URL}/sensors-connected`);
+      // ✅ Le backend renvoie Strom, Wirkleistung, Blindleistung,
+      // Scheinleistung, CosinusPhi, Energie et Spannung tous bruts (lus
+      // directement depuis InfluxDB) — rien à recalculer côté React.
       setSensors(res.data?.sensors || []);
       if (isManualRefresh) {
         setMessageType("success");
@@ -1238,18 +1235,15 @@ const MappingManager = () => {
     }
   };
 
-  useEffect(() => { loadSensors(false, liveOnly); }, [liveOnly]);
+  useEffect(() => { loadSensors(false); }, []);
 
   // ✅ Rafraîchissement automatique des valeurs (Strom, Energie, Cosinus Phi...)
   // toutes les secondes, comme la vue "Live Daten" — en silencieux, sans
   // recharger l'état "loading" ni le message de confirmation.
   useEffect(() => {
-    const iv = setInterval(() => loadSensors(false, liveOnly, true), 1000);
+    const iv = setInterval(() => loadSensors(false, true), 1000);
     return () => clearInterval(iv);
-  }, [liveOnly]);
-
-  // ✅ Bascule le toggle ; le useEffect ci-dessus recharge automatiquement
-  const handleToggleLiveOnly = () => setLiveOnly(prev => !prev);
+  }, []);
 
   // ✅ Le device tension ("Netz", anciennement "Sensor0") est affiché à part,
   // dans des boîtes Phase 1/2/3 comme sur l'onglet Echtzeit — pas comme une
@@ -1316,7 +1310,7 @@ const MappingManager = () => {
       setMessageType("success");
       setMessage(`✅ Energiezähler für ${device}, Kanal ${kanal} wurde zurückgesetzt.`);
       setTimeout(() => setMessage(""), 3000);
-      loadSensors(false, liveOnly);
+      loadSensors(false);
     } catch (err) {
       setMessageType("error");
       setMessage("❌ Der Energiezähler konnte nicht zurückgesetzt werden. " + stripIps(err.message || "Bitte erneut versuchen."));
@@ -1395,34 +1389,16 @@ const MappingManager = () => {
               </Box>
             </Popover>
 
-            {/* ✅ Nouveau bouton toggle : capteurs connectés maintenant vs historique complet */}
-            <Button
-              variant={liveOnly ? "contained" : "outlined"}
-              onClick={handleToggleLiveOnly}
-              startIcon={<DeviceHubIcon />}
-              sx={{
-                borderRadius: 20,
-                boxShadow: 'none',
-                bgcolor: liveOnly ? SUCCESS : 'transparent',
-                borderColor: liveOnly ? SUCCESS : BORDER,
-                color: liveOnly ? '#fff' : INK,
-                "&:hover": { bgcolor: liveOnly ? "#166B48" : SURFACE, boxShadow: 'none' }
-              }}
-            >
-              {liveOnly ? "Nur aktuell verbundene Sensoren" : "Alle Sensoren (Verlauf)"}
-            </Button>
-
-            <Button variant="outlined" onClick={() => loadSensors(true, liveOnly)} disabled={refreshing} startIcon={<UpdateIcon />}
+            <Button variant="outlined" onClick={() => loadSensors(true)} disabled={refreshing} startIcon={<UpdateIcon />}
               sx={{ borderRadius: 20, borderColor: BORDER, color: INK }}>
               {refreshing ? "Aktualisieren..." : "Aktualisieren"}
             </Button>
           </Box>
         </Box>
-        {/* ✅ Indicateur explicite du mode actif */}
+        {/* ✅ SIMPLIFIÉ : plus de bascule Verlauf — toujours uniquement les
+            capteurs actuellement actifs (fenêtre de 15s côté backend). */}
         <Typography variant="caption" sx={{ display: "block", mt: 1.5, color: INK_MUTED }}>
-          {liveOnly
-            ? "Anzeige: nur Sensoren, die aktuell (letzte 10 Sek.) Daten senden."
-            : "Anzeige: alle Sensoren, die jemals Daten gesendet haben (Verlauf)."}
+          Anzeige: nur Sensoren, die aktuell Daten senden.
         </Typography>
       </Paper>
 
@@ -1452,7 +1428,7 @@ const MappingManager = () => {
       {visibleSensors.length === 0 ? (
         <Paper elevation={0} sx={{ p: 3, bgcolor: PANEL }}>
           <Typography sx={{ color: INK_MUTED }}>
-            {liveOnly ? "Keine aktuell verbundenen Sensoren gefunden." : "Keine aktiven Sensoren in InfluxDB gefunden."}
+            Keine aktuell verbundenen Sensoren gefunden.
           </Typography>
         </Paper>
       ) : (
