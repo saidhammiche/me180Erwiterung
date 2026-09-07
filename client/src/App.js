@@ -109,18 +109,22 @@ const CHANNEL_ORDER = [
 
 // ✅ Rendu à deux tons pour la lisibilité : "PH" en gris discret, le reste
 // ("1 a", "2 g"...) en couleur marque et en gras.
-const getChannelDisplaySuffix = (ch) => {
-  const m = String(ch).match(/^CH(\d+\s+[a-r])$/i);
-  return m ? m[1] : null;
+// ✅ "PH" + numéro de groupe (PH1, PH2, PH3) gardent toujours le même style
+// discret (gris, taille normale) quel que soit le canal — seule la lettre
+// (a, b, c...) ressort dans une couleur différente pour repérer le canal
+// exact au sein d'un groupe.
+const getChannelParts = (ch) => {
+  const m = String(ch).match(/^CH(\d+)\s+([a-r])$/i);
+  return m ? { group: m[1], letter: m[2] } : null;
 };
 
 const ChannelLabel = ({ channel, letterColor = BRAND }) => {
-  const suffix = getChannelDisplaySuffix(channel);
-  if (!suffix) return <>{channel}</>;
+  const parts = getChannelParts(channel);
+  if (!parts) return <>{channel}</>;
   return (
     <Box component="span" sx={{ display: "inline-flex", alignItems: "baseline", gap: "4px" }}>
-      <Box component="span" sx={{ color: INK_MUTED, fontWeight: 600, fontSize: "0.75em", letterSpacing: "0.3px" }}>PH</Box>
-      <Box component="span" sx={{ color: letterColor, fontWeight: 800 }}>{suffix}</Box>
+      <Box component="span" sx={{ color: INK_MUTED, fontWeight: 600, fontSize: "0.75em", letterSpacing: "0.3px" }}>PH{parts.group}</Box>
+      <Box component="span" sx={{ color: letterColor, fontWeight: 800 }}>{parts.letter}</Box>
     </Box>
   );
 };
@@ -1641,7 +1645,7 @@ function AppContent() {
   const shouldShowTrendChannel = ch  => trendSelectedChannels.length === 0 || trendSelectedChannels.includes(ch);
   const shouldShowTrendMetric  = key => trendSelectedMetrics.length === 0  || trendSelectedMetrics.includes(key);
 
-  const grafanaUrl = "http://192.168.1.20:3000/d/adrxt9v/energie?orgId=1&from=now-30m&to=now&timezone=browser&var-Kanal=PH1%20a&refresh=5s";
+  const grafanaUrl = "http://192.168.1.20:3000/d/adrxt9v/energie?orgId=1&from=now-30m&to=now&timezone=browser&var-Kanal=CH1%20a&refresh=5s";
 
   // ── NavBar ──
   const NavBar = () => (
