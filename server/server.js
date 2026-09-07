@@ -37,22 +37,22 @@ if (!MESSE_IP || !MESSE_ID) {
 }
 
 // ✅ Nommage aligné sur le flow Node-RED (mE180) : 18 canaux physiques
-// nommés "CH1 a".."CH3 r" (préfixe "PH" au lieu de l'ancien "CH", mais on
+// nommés "PH1 a".."PH3 r" (préfixe "PH" au lieu de l'ancien "CH", mais on
 // garde le numéro de groupe 1/2/3 = phase L1/L2/L3 et la lettre a-r qui
 // identifie la position exacte parmi les 18 canaux).
 // L'ordre positionnel est identique à avant (index 0 = premier canal, etc.),
 // donc toute la logique basée sur la position dans ce tableau reste valable.
-// ⚠️ Les données déjà écrites dans InfluxDB sous l'ancien tag ("CH1 a"...)
+// ⚠️ Les données déjà écrites dans InfluxDB sous l'ancien tag ("PH1 a"...)
 // restent inchangées (non migrées) ; seules les nouvelles écritures utilisent
-// désormais "CH1 a".."CH3 r".
+// désormais "PH1 a".."PH3 r".
 const channelsList = [
-    "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
-    "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
-    "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
+    "PH1 a", "PH1 b", "PH1 c", "PH1 d", "PH1 e", "PH1 f",
+    "PH2 g", "PH2 h", "PH2 i", "PH2 j", "PH2 k", "PH2 l",
+    "PH3 m", "PH3 n", "PH3 o", "PH3 p", "PH3 q", "PH3 r"
 ];
 
 // ✅ Le nom de canal n'est plus "parsable" directement pour tous les cas dans
-// l'ancien format ("CH1 a" n'était pas un simple CH+numéro) : on retrouve le
+// l'ancien format ("PH1 a" n'était pas un simple CH+numéro) : on retrouve le
 // numéro physique 1-18 par sa position dans channelsList, plutôt que par
 // découpage de chaîne.
 function channelNumber(ch) {
@@ -665,6 +665,35 @@ function getAggregationWindow(duration) {
     return map[duration] || "10s";
 }
 
+// ✅ AJOUT : conversion d'une durée Flux ("5m", "1h", "24h"...) en millisecondes,
+// utilisée pour générer une courbe de secours quand aucune donnée n'existe.
+function durationToMs(duration) {
+    const m = String(duration).match(/^(\d+)([smhd])$/);
+    if (!m) return 60 * 60 * 1000; // repli : 1h
+    const n = parseInt(m[1], 10);
+    const mult = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2]];
+    return n * mult;
+}
+
+// ✅ AJOUT : si un canal/capteur n'a strictement aucune donnée sur la période
+// demandée (série jamais écrite, ou hors ligne depuis le début de la
+// fenêtre), on génère quand même une courbe plate à 0 sur toute la durée —
+// ainsi le graphe "Trends" affiche toujours une ligne au lieu du message
+// "Keine historischen Daten".
+function generateZeroSeries(duration, fields) {
+    const stepMs  = durationToMs(getAggregationWindow(duration));
+    const totalMs = durationToMs(duration);
+    const now     = Date.now();
+    const start   = now - totalMs;
+    const points  = [];
+    for (let t = start; t <= now; t += stepMs) {
+        const point = { time: new Date(t).toISOString() };
+        fields.forEach(f => { point[f] = 0; });
+        points.push(point);
+    }
+    return points;
+}
+
 // ========== ROUTE HISTORIQUE DIRECT PAR SENSOR/KANAL (pour onglet Mapping) ==========
 
 app.get("/sensor-history/:device/:kanal", async (req, res) => {
@@ -685,7 +714,8 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
           |> filter(fn: (r) => r.Device == "${device}")
           |> filter(fn: (r) => r.Kanal  == "${kanal}")
           |> filter(fn: (r) => r._field == "${metric}")
-          |> aggregateWindow(every: ${getAggregationWindow(duration)}, fn: mean, createEmpty: false)
+          |> aggregateWindow(every: ${getAggregationWindow(duration)}, fn: mean, createEmpty: true)
+          |> fill(value: 0.0)
           |> sort(columns: ["_time"])
     `;
 
@@ -699,13 +729,17 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
             : 0;
         const data = rows
             .map(row => {
-                const value = (metric === "Energie" && row._value !== null && row._value !== undefined)
-                    ? Math.max(0, row._value - offset)
-                    : row._value;
+                const raw = row._value ?? 0;
+                const value = (metric === "Energie")
+                    ? Math.max(0, raw - offset)
+                    : raw;
                 return { time: row._time, [metric]: value };
             })
             .sort((a, b) => new Date(a.time) - new Date(b.time));
-        res.json({ device, kanal, metric, data });
+        // ✅ Si le canal n'a strictement aucune donnée sur la période (série
+        // jamais écrite), on retourne quand même une courbe plate à 0.
+        const finalData = data.length > 0 ? data : generateZeroSeries(duration, [metric]);
+        res.json({ device, kanal, metric, data: finalData });
     } catch (error) {
         console.error(`/sensor-history ${device}/${kanal} error:`, error);
         res.status(500).json({ error: error.message });
@@ -1042,7 +1076,8 @@ app.get("/history/:channel", async (req, res) => {
           |> filter(fn: (r) => r.Device == "${MEGO_DEVICE}")
           |> filter(fn: (r) => r.Kanal  == "${ch}")
           |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor" or r._field == "Energie")
-          |> aggregateWindow(every: ${getAggregationWindow(duration)}, fn: mean, createEmpty: false)
+          |> aggregateWindow(every: ${getAggregationWindow(duration)}, fn: mean, createEmpty: true)
+          |> fill(value: 0.0)
           |> sort(columns: ["_time"])
     `;
 
@@ -1052,18 +1087,25 @@ app.get("/history/:channel", async (req, res) => {
         rows.forEach(row => {
             const t = row._time;
             if (!pointsByTime[t]) pointsByTime[t] = { time: t };
-            if      (row._field === "Strom")          pointsByTime[t].Strom        = row._value;
-            else if (row._field === "Wirkleistung")   pointsByTime[t].Wirkleistung = row._value;
-            else if (row._field === "Leistungsfaktor") pointsByTime[t].CosinusPhi  = row._value;
-            else if (row._field === "Energie")         pointsByTime[t].Energie_temp = row._value;
+            const val = row._value ?? 0;
+            if      (row._field === "Strom")          pointsByTime[t].Strom        = val;
+            else if (row._field === "Wirkleistung")   pointsByTime[t].Wirkleistung = val;
+            else if (row._field === "Leistungsfaktor") pointsByTime[t].CosinusPhi  = val;
+            else if (row._field === "Energie")         pointsByTime[t].Energie_temp = val;
         });
         const data = Object.values(pointsByTime)
             .map(point => {
-                const { S, Q } = computeApparentAndReactive(point.Wirkleistung ?? null, point.CosinusPhi ?? null);
-                return { ...point, Scheinleistung: S, Blindleistung: Q };
+                const { S, Q } = computeApparentAndReactive(point.Wirkleistung ?? 0, point.CosinusPhi ?? 0);
+                return { ...point, Scheinleistung: S ?? 0, Blindleistung: Q ?? 0 };
             })
             .sort((a, b) => new Date(a.time) - new Date(b.time));
-        res.json({ channel: ch, data });
+        // ✅ Si le canal n'a strictement aucune donnée sur la période (série
+        // jamais écrite), on retourne quand même une courbe plate à 0 pour
+        // toutes les mesures, plutôt que le message "Keine historischen Daten".
+        const finalData = data.length > 0
+            ? data
+            : generateZeroSeries(duration, ["Strom", "Wirkleistung", "CosinusPhi", "Energie_temp", "Scheinleistung", "Blindleistung"]);
+        res.json({ channel: ch, data: finalData });
     } catch (error) {
         console.error(`/history ${ch} error:`, error);
         res.status(500).json({ error: error.message });
