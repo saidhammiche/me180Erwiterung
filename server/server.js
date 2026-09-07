@@ -714,8 +714,7 @@ app.get("/sensor-history/:device/:kanal", async (req, res) => {
           |> filter(fn: (r) => r.Device == "${device}")
           |> filter(fn: (r) => r.Kanal  == "${kanal}")
           |> filter(fn: (r) => r._field == "${metric}")
-          |> aggregateWindow(every: ${getAggregationWindow(duration)}, fn: mean, createEmpty: true)
-          |> fill(value: 0.0)
+          |> aggregateWindow(every: ${getAggregationWindow(duration)}, fn: mean, createEmpty: false)
           |> sort(columns: ["_time"])
     `;
 
@@ -1076,8 +1075,7 @@ app.get("/history/:channel", async (req, res) => {
           |> filter(fn: (r) => r.Device == "${MEGO_DEVICE}")
           |> filter(fn: (r) => r.Kanal  == "${ch}")
           |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor" or r._field == "Energie")
-          |> aggregateWindow(every: ${getAggregationWindow(duration)}, fn: mean, createEmpty: true)
-          |> fill(value: 0.0)
+          |> aggregateWindow(every: ${getAggregationWindow(duration)}, fn: mean, createEmpty: false)
           |> sort(columns: ["_time"])
     `;
 
