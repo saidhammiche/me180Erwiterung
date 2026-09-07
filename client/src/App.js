@@ -1641,7 +1641,7 @@ function AppContent() {
   const shouldShowTrendChannel = ch  => trendSelectedChannels.length === 0 || trendSelectedChannels.includes(ch);
   const shouldShowTrendMetric  = key => trendSelectedMetrics.length === 0  || trendSelectedMetrics.includes(key);
 
-  const grafanaUrl = "http://192.168.1.20:3000/d/adrxt9v/energie?orgId=1&from=now-30m&to=now&timezone=browser&var-Kanal=CH1%20a&refresh=5s";
+  const grafanaUrl = "http://192.168.1.20:3000/d/adrxt9v/energie?orgId=1&from=now-30m&to=now&timezone=browser&var-Kanal=PH1%20a&refresh=5s";
 
   // ── NavBar ──
   const NavBar = () => (
