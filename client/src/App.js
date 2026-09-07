@@ -96,26 +96,31 @@ const theme = createTheme({
 const API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:4000`;
 const STARTSEITE_URL = "http://192.168.1.20:8080";
 
-// ✅ Affichage des canaux en lettres (CH A, CH B, CH C...) au lieu de
-// numéros (CH1, CH2...). Les clés internes restent "CH1".."CH18" partout
-// (API, mapping, tri, filtres) — seul le texte affiché change.
-const CHANNEL_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+// ✅ Affichage des canaux du mE180 : le préfixe "CH" est simplement remplacé
+// par "PH" à l'affichage (ex: tag brut "CH1 a" -> affiché "PH1 a"), le
+// numéro de groupe (1/2/3 = phase L1/L2/L3) et la lettre (a-r) sont conservés
+// tels quels. Le tag brut ci-dessous reste identique partout ailleurs (API,
+// mapping, tri, filtres, InfluxDB) pour ne rien casser côté stockage/historique.
+const CHANNEL_ORDER = [
+  "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
+  "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
+  "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
+];
 
-// ✅ Rendu à deux tons pour la lisibilité : "CH" en gris discret, la lettre
-// en couleur marque et en gras — bien plus lisible qu'un bloc de texte uni.
-const getChannelLetter = (ch) => {
-  const match = String(ch).match(/(\d+)\s*$/);
-  if (!match) return null;
-  return CHANNEL_LETTERS[parseInt(match[1], 10) - 1] || null;
+// ✅ Rendu à deux tons pour la lisibilité : "PH" en gris discret, le reste
+// ("1 a", "2 g"...) en couleur marque et en gras.
+const getChannelDisplaySuffix = (ch) => {
+  const m = String(ch).match(/^CH(\d+\s+[a-r])$/i);
+  return m ? m[1] : null;
 };
 
 const ChannelLabel = ({ channel, letterColor = BRAND }) => {
-  const letter = getChannelLetter(channel);
-  if (!letter) return <>{channel}</>;
+  const suffix = getChannelDisplaySuffix(channel);
+  if (!suffix) return <>{channel}</>;
   return (
     <Box component="span" sx={{ display: "inline-flex", alignItems: "baseline", gap: "4px" }}>
-      <Box component="span" sx={{ color: INK_MUTED, fontWeight: 600, fontSize: "0.75em", letterSpacing: "0.3px" }}>CH</Box>
-      <Box component="span" sx={{ color: letterColor, fontWeight: 800 }}>{letter}</Box>
+      <Box component="span" sx={{ color: INK_MUTED, fontWeight: 600, fontSize: "0.75em", letterSpacing: "0.3px" }}>PH</Box>
+      <Box component="span" sx={{ color: letterColor, fontWeight: 800 }}>{suffix}</Box>
     </Box>
   );
 };
@@ -221,6 +226,9 @@ const ValueBadge = ({ children, muted = false }) => (
 );
 
 // ─── FILTER BAR ───────────────────────────────────────────────────────────────
+// ✅ itemsLabel permet de réutiliser ce composant pour filtrer soit des
+// "Kanäle" (vue Live Daten/Trends), soit des "Sensoren" (vue Mapping) — seul
+// le texte affiché change, toute la logique de sélection reste identique.
 const FilterBar = memo(({
   selectedChannels, selectedMetrics,
   onChannelChange, onSelectAllChannels,
@@ -228,6 +236,7 @@ const FilterBar = memo(({
   onResetFilters, hasActiveFilters,
   orderedChannels, metricOptions,
   mobileDrawer = false,
+  itemsLabel = "Kanäle",
 }) => {
   const isMobile = useMediaQuery("(max-width:600px)");
   const [drawerOpen, setDrawerOpen]           = useState(false);
@@ -261,7 +270,7 @@ const FilterBar = memo(({
       <Box sx={{ p: 2, minWidth: 250, maxWidth: 350 }}>
         <FormControlLabel
           control={<Checkbox checked={selChCount === totChCount} indeterminate={selChCount > 0 && selChCount < totChCount} onChange={onSelectAllChannels} />}
-          label="Alle Kanäle" />
+          label={`Alle ${itemsLabel}`} />
         <Divider sx={{ my: 1 }} />
         <Box sx={{ maxHeight: 300, overflow: "auto" }}>
           {orderedChannels.map(ch => (
@@ -298,11 +307,11 @@ const FilterBar = memo(({
   const drawerContent = (
     <Box sx={{ p: 2, width: 280 }}>
       <Typography variant="h6" gutterBottom sx={{ color: INK }}>Filter</Typography>
-      <Typography variant="subtitle2" gutterBottom sx={{ color: INK_MUTED }}>Kanäle</Typography>
+      <Typography variant="subtitle2" gutterBottom sx={{ color: INK_MUTED }}>{itemsLabel}</Typography>
       <Box sx={{ mb: 2, maxHeight: 200, overflow: "auto" }}>
         <FormControlLabel
           control={<Checkbox checked={selChCount === totChCount} indeterminate={selChCount > 0 && selChCount < totChCount} onChange={onSelectAllChannels} />}
-          label="Alle Kanäle" />
+          label={`Alle ${itemsLabel}`} />
         {orderedChannels.map(ch => (
           <FormControlLabel key={ch}
             control={<Checkbox checked={selectedChannels.includes(ch)} onChange={() => handleChannelToggle(ch)} />}
@@ -344,7 +353,7 @@ const FilterBar = memo(({
     <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
       <Button variant="outlined" onClick={e => { e.stopPropagation(); setChannelAnchorEl(e.currentTarget); }}
         endIcon={<span>▼</span>} sx={{ minWidth: 150, borderRadius: 20, borderColor: BORDER, color: INK }}>
-        {selChCount === 0 || selChCount === totChCount ? "Alle Kanäle" : `${selChCount} Kanäle`}
+        {selChCount === 0 || selChCount === totChCount ? `Alle ${itemsLabel}` : `${selChCount} ${itemsLabel}`}
       </Button>
       {channelPopover}
       <Button variant="outlined" onClick={e => { e.stopPropagation(); setMetricAnchorEl(e.currentTarget); }}
@@ -1028,7 +1037,8 @@ const KANAL_LABELS = { "1": "L1", "2": "L2", "3": "L3", "4": "N" };
 const KANAL_OPTIONS = ["1", "2", "3", "4"];
 // ✅ Couleur spécifique par Kanal (1-4), utilisée pour repérer visuellement
 // chaque canal d'un Sensor (Sensor-Bezeichnung, Mapping/Kundendaten).
-const KANAL_COLORS = { "1": "#1976d2", "2": "#2e7d32", "3": "#e65100", "4": "#6a1b9a" };
+// Kanal 1 = Braun, Kanal 2 = Schwarz, Kanal 3 = Grau, Kanal 4 = Blau.
+const KANAL_COLORS = { "1": "#795548", "2": "#000000", "3": "#757575", "4": "#1976d2" };
 
 // ─── MAPPING DETAIL (historique d'un Sensor/Kanal) ──────────────────────────
 // ✅ Habillage identique à la vue "Zeitsynchronisation" du portail : lecteurs
@@ -1360,9 +1370,11 @@ const MappingManager = () => {
               onChannelChange={handleSensorChange} onSelectAllChannels={handleSelectAllSensors}
               onMetricChange={handleMetricChange} onSelectAllMetrics={handleSelectAllMetrics}
               onResetFilters={resetMappingFilters} hasActiveFilters={hasActiveFilters}
-              orderedChannels={allDeviceNames} metricOptions={MAPPING_METRIC_OPTIONS} mobileDrawer />
+              orderedChannels={allDeviceNames} metricOptions={MAPPING_METRIC_OPTIONS} mobileDrawer
+              itemsLabel="Sensoren" />
 
-            {/* ✅ Filtre Kanal indépendant (1/2/3/4 → L1/L2/L3/N) */}
+            {/* ✅ Filtre Kanal indépendant (1/2/3/4 → L1/L2/L3/N), appliqué après
+                le filtre Sensoren ci-dessus */}
             <Button variant="outlined" onClick={e => { e.stopPropagation(); setKanalAnchorEl(e.currentTarget); }}
               endIcon={<span>▼</span>} sx={{ minWidth: 150, borderRadius: 20, borderColor: BORDER, color: INK }}>
               {selKaCount === 0 || selKaCount === totKaCount ? "Alle Kanäle" : `${selKaCount} Kanäle`}
@@ -1571,9 +1583,9 @@ function AppContent() {
     axios.get(`${API_BASE_URL}/config`)
       .then(res => {
         const keys = Object.keys(res.data).filter(k => !k.startsWith("L"));
-        setOrderedChannels(keys.length > 0 ? keys : Array.from({ length: 18 }, (_, i) => `CH${i + 1}`));
+        setOrderedChannels(keys.length > 0 ? keys : CHANNEL_ORDER);
       })
-      .catch(() => setOrderedChannels(Array.from({ length: 18 }, (_, i) => `CH${i + 1}`)));
+      .catch(() => setOrderedChannels(CHANNEL_ORDER));
   }, []);
 
   const fetchVoltages = async () => {

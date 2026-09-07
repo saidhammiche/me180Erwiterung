@@ -37,20 +37,24 @@ if (!MESSE_IP || !MESSE_ID) {
 }
 
 // ✅ Nommage aligné sur le flow Node-RED (mE180) : 18 canaux physiques
-// nommés "CH1 a".."CH1 f" (phase L1), "CH2 g".."CH2 l" (phase L2),
-// "CH3 m".."CH3 r" (phase L3) — au lieu de l'ancien "CH1".."CH18".
+// nommés "CH1 a".."CH3 r" (préfixe "PH" au lieu de l'ancien "CH", mais on
+// garde le numéro de groupe 1/2/3 = phase L1/L2/L3 et la lettre a-r qui
+// identifie la position exacte parmi les 18 canaux).
 // L'ordre positionnel est identique à avant (index 0 = premier canal, etc.),
 // donc toute la logique basée sur la position dans ce tableau reste valable.
+// ⚠️ Les données déjà écrites dans InfluxDB sous l'ancien tag ("CH1 a"...)
+// restent inchangées (non migrées) ; seules les nouvelles écritures utilisent
+// désormais "CH1 a".."CH3 r".
 const channelsList = [
     "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
     "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
     "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
 ];
 
-// ✅ Le nom de canal n'est plus "parsable" directement (ex: "CH1 a" n'est pas
-// un simple CH+numéro) : on retrouve le numéro physique 1-18 par sa position
-// dans channelsList, plutôt que par découpage de chaîne (ancien
-// `parseInt(ch.substring(2), 10)`, qui ne fonctionne plus de façon fiable).
+// ✅ Le nom de canal n'est plus "parsable" directement pour tous les cas dans
+// l'ancien format ("CH1 a" n'était pas un simple CH+numéro) : on retrouve le
+// numéro physique 1-18 par sa position dans channelsList, plutôt que par
+// découpage de chaîne.
 function channelNumber(ch) {
     const idx = channelsList.indexOf(ch);
     return idx === -1 ? NaN : idx + 1;
@@ -83,8 +87,8 @@ let channelConfig = {};
 
 function getDefaultHoechstwert(ch) {
     // ✅ Avant : comparait le nom exact ("CH1"/"CH7"/"CH13"). Avec le nouveau
-    // nommage ("CH1 a", "CH2 g", "CH3 m"...), on se base sur la position
-    // (1er canal de chaque groupe de 6 = phase L1/L2/L3) via channelNumber().
+    // nommage ("PH1".."PH18"), on se base sur la position (1er canal de
+    // chaque groupe de 6 = phase L1/L2/L3) via channelNumber().
     const num = channelNumber(ch);
     return num === 1 || num === 7 || num === 13 ? 64 : 32;
 }
@@ -128,7 +132,7 @@ async function getLabelsFromMesskoffer() {
             : [];
         const result = {};
         for (let i = 0; i < 18; i++) {
-            // ✅ CORRIGÉ : clé = nom réel du canal (channelsList[i], ex "CH1 a")
+            // ✅ CORRIGÉ : clé = nom réel du canal (channelsList[i], ex "PH1")
             // au lieu de l'ancien "CH${i+1}" — sinon channelConfig[ch] ne
             // retrouvait jamais ce label (clé introuvable) et retombait sur
             // le nom du canal lui-même comme "Bezeichnung".
@@ -271,7 +275,7 @@ async function initConfigFromMesskoffer() {
 // ✅ AJOUT : au démarrage (surtout après un reboot système), le réseau ou le
 // Messkoffer peuvent ne pas être encore disponibles quand ce conteneur
 // démarre. Un seul essai qui échoue figeait alors les labels par défaut
-// (nom du canal, ex "CH1 a") jusqu'à un redémarrage manuel plus tardif du
+// (nom du canal, ex "PH1") jusqu'à un redémarrage manuel plus tardif du
 // conteneur (réseau alors déjà up). On réessaie donc plusieurs fois avec un
 // délai, tant que le Messkoffer n'est pas joignable.
 async function initConfigFromMesskofferWithRetry(maxAttempts = 20, delayMs = 5000) {
@@ -1015,11 +1019,8 @@ app.get("/data", async (req, res) => {
 
 app.get("/history/:channel", async (req, res) => {
     const { channel } = req.params;
-    // ✅ Le nouveau nommage ("CH1 a", "CH2 g"...) contient une lettre en
-    // minuscule qui fait partie du nom — un .toUpperCase() la transformait
-    // en majuscule et cassait la comparaison avec channelsList. On accepte
-    // désormais le canal tel quel (le frontend envoie déjà la bonne casse,
-    // puisqu'il réutilise les clés retournées par /config).
+    // ✅ Le nommage "PH1".."PH18" est utilisé tel quel (le frontend envoie déjà
+    // la bonne casse, puisqu'il réutilise les clés retournées par /config).
     const ch = channel;
     if (!channelsList.includes(ch)) {
         return res.status(400).json({ error: "Ungültiger Kanal" });
@@ -1095,6 +1096,6 @@ app.listen(4000, "0.0.0.0", () => {
     console.log("✅ Server läuft auf Port 4000");
     console.log(`   InfluxDB : ${INFLUX_URL} | Bucket: ${INFLUX_BUCKET}`);
     console.log(`   Messkoffer: ${MESSE_IP} | ID: ${MESSE_ID}`);
-    console.log(`   Kanäle: 18 | Mapping: CH1-CH18 → SensorN/Kanal`);
+    console.log(`   Kanäle: 18 | Mapping: PH1-PH18 → SensorN/Kanal`);
     console.log(`   Sensoren "connectés maintenant" : via Node-RED (${NODERED_URL}/sensoranzahl)`);
 });
