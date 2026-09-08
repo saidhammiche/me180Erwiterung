@@ -206,15 +206,14 @@ const augmentSensorsWithDerivedValues = (rawSensors) => {
   });
 };
 
-// ✅ Le serveur/Node-RED stockent et transmettent le champ "Energie" (vue
-// Mapping, Sensor1/Sensor2) en Wh — seule la vue "Mapping" en affiche le
-// résultat en kWh (division par 1000), sans toucher au stockage ni à
-// Node-RED. Utilisé uniquement pour metric.value === "Energie" dans cette vue.
+// ✅ CORRIGÉ : Node-RED écrit "Energie" (Sensor1/2/3, measurement "sensoren")
+// directement en kWh — c'est le registre Econsumed du Volt1000S (Modbus,
+// float32, unité KWh d'après la doc constructeur), lu tel quel sans aucune
+// mise à l'échelle. Il n'y a donc plus de conversion à faire ici : avant, une
+// division par 1000 supposait à tort un stockage en Wh, ce qui affichait des
+// valeurs 1000x trop petites (ex: 0.35 kWh réel -> 0.00 kWh affiché).
 const formatMappingMetricValue = (metric, rawValue) => {
-  const value = metric.value === "Energie" && rawValue !== null && rawValue !== undefined
-    ? rawValue / 1000
-    : rawValue;
-  return formatValue(value, metric.decimals, metric.unit);
+  return formatValue(rawValue, metric.decimals, metric.unit);
 };
 
 // ─── Petit badge de valeur (chiffre en mono, cohérent avec le portail) ──────
@@ -1001,8 +1000,10 @@ const EnergyManager = () => {
 // partir de Strom + CosinusPhi (lus en Modbus) et Spannung (Netz, partagée).
 // ✅ MODIFIÉ : Cosinus Phi retiré de l'affichage — le backend continue de le
 // calculer en interne (nécessaire pour Blindleistung/Scheinleistung).
-// ✅ MODIFIÉ : Energie affichée en Wh (au lieu de kWh) — la conversion est
-// faite en amont, côté Node-RED (valeur × 1000 avant écriture InfluxDB).
+// ✅ CORRIGÉ : Energie affichée en kWh, telle qu'écrite par Node-RED (registre
+// Econsumed du Volt1000S, déjà en kWh) — aucune conversion d'unité n'est
+// faite en amont côté Node-RED, donc plus aucune ici non plus (cf.
+// formatMappingMetricValue plus haut).
 const MAPPING_METRIC_OPTIONS = [
   { value: "Strom",         label: "Strom (A)",          icon: ElectricBoltIcon,        decimals: 3, unit: "A"   },
   { value: "CosinusPhi",    label: "Cosinus Phi",         icon: FunctionsIcon,           decimals: 4, unit: ""    },
@@ -1068,13 +1069,12 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
           `${API_BASE_URL}/sensor-history/${device}/${selectedKanal}?metric=${selectedMetric}&time=${timeRange}`
         );
         if (!cancelled && res.data?.data) {
-          // ✅ Le serveur renvoie "Energie" en Wh (stockage inchangé) — cette
-          // vue l'affiche en kWh, donc conversion ici uniquement, à l'affichage.
-          const rawData = res.data.data;
-          const converted = (selectedMetric === "Energie")
-            ? rawData.map(pt => ({ ...pt, Energie: pt.Energie !== null && pt.Energie !== undefined ? pt.Energie / 1000 : pt.Energie }))
-            : rawData;
-          setHistoryData(converted);
+          // ✅ CORRIGÉ : le serveur renvoie déjà "Energie" en kWh (registre
+          // Econsumed du Volt1000S, lu tel quel — cf. server.js /sensor-history)
+          // — plus aucune conversion à faire ici. Avant, une division par 1000
+          // supposait à tort un stockage en Wh et affichait des valeurs
+          // 1000x trop petites dans le graphique historique.
+          setHistoryData(res.data.data);
         }
       } catch (err) { console.error("Erreur historique sensor-history:", err); }
     };
