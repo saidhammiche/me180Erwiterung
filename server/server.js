@@ -138,29 +138,22 @@ function getKundenLabel(device, kanal) {
 // Blindleistung/Scheinleistung, calculées à partir de Wirkleistung + CosPhi
 // via computeApparentAndReactive(), sont corrigées automatiquement.
 //
-// ⚠️ MODIFIÉ (2e itération) : la 1ère version se basait sur le tableau
-// générique de la doc CGI (Höchstwert 640-6400 A => résolution 100), ce qui
-// donnait un facteur x100 pour les canaux à Höchstwert=1000 — beaucoup trop
-// (écart réellement observé = x10, pas x100). On garde donc le principe
-// "la correction dépend du Höchstwert du canal" (confirmé par toi via
-// http://192.168.1.20:5000/?view=config : les canaux 5, 6, 11, 12, 17, 18
-// ont un Höchstwert=1000, les autres 125 ou 250), mais avec le facteur
-// réellement constaté (x10) plutôt que celui du tableau doc.
+// ⚠️ DÉSACTIVÉE (3e itération) : le vrai bug était côté Node-RED (flow mE180,
+// fonctions "Wirkleistung_ChN") — les canaux 5, 6, 11, 12, 17, 18
+// (Höchstwert=1000 A) y appliquaient le même facteur "* 10" que tous les
+// autres canaux (Höchstwert=125/250 A), alors qu'ils avaient besoin de
+// "* 100". Corrigé directement dans le flow Node-RED : Node-RED écrit
+// désormais la bonne valeur dans InfluxDB pour TOUS les consommateurs
+// (cette API ET Grafana, qui lit directement InfluxDB sans passer par ici).
 //
-// Concrètement : Höchstwert=1000 A => facteur x10 ; Höchstwert=125 ou 250 A
-// => pas de correction (facteur x1). Le seuil (>640) reprend simplement la
-// frontière du tableau doc pour distinguer les deux groupes, sans utiliser
-// son facteur (x100) qui ne correspond pas à la réalité mesurée ici.
-//
-// ✅ Avantage par rapport à une liste de noms de canaux : si demain un canal
-// change de calibre (Höchstwert modifié sur le Messkoffer, ex: via l'onglet
-// Config ou set_sensor_config.cgi), la correction s'ajuste automatiquement
-// sans qu'il faille retoucher ce fichier.
+// Comme la donnée est maintenant juste dès l'écriture, cette fonction ne
+// doit plus rien corriger ici — sinon on obtiendrait un double correctif
+// (×100 dans Node-RED + ×10 ici = ×1000, complètement faux). Elle est
+// gardée en passthrough (et non supprimée) pour ne pas casser les appels
+// existants dans /data et /history, et pour pouvoir la réactiver facilement
+// si un nouveau canal montre un écart d'échelle à l'avenir.
 function correctScale(ch, value) {
-    if (value === null || value === undefined || isNaN(value)) return value;
-    const hoechstwert = parseFloat(channelConfig[ch]?.hoechstwert);
-    const needsCorrection = !isNaN(hoechstwert) && hoechstwert > 640;
-    return needsCorrection ? value * 10 : value;
+    return value;
 }
 
 // ========== MESSKOFFER CGI HELPERS ==========
@@ -510,10 +503,12 @@ function computeApparentAndReactiveFromUI(U, I, P) {
 
 // ========== DECOUVERTE DYNAMIQUE SENSOR/KANAL (FONCTION PARTAGEE) ==========
 
-// ⚠️ NON UTILISÉE DANS discoverSensors() : servait uniquement a la
-// correlation CosPhi horaire (CGI) via un canal global "Sensor0", supprimee
-// ci-dessous puisque CosPhi est maintenant lu directement par Device/Kanal.
-// Fonction laissee en place (non appelee) pour ne rien modifier d'autre.
+// ✅ RÉACTIVÉE : sert désormais à retrouver, pour un Device+Kanal du système
+// Volt1000S (Sensor1/Sensor2/Sensor3, mesure "sensoren"), le canal PH
+// correspondant (ex: "PH1 f") afin de lire son Höchstwert dans channelConfig
+// et lui appliquer la même correction d'échelle que le système Messkoffer
+// (voir correctScale plus haut) — même cause (Höchstwert > 640 A selon le
+// calibre de pince), même symptôme (valeur brute x10 trop petite).
 function findChannelForDeviceKanal(device, kanal) {
     for (const [ch, map] of Object.entries(channelMapping)) {
         if (map.device === device && map.kanal === String(kanal)) return ch;
